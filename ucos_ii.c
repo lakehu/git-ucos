@@ -18,11 +18,11 @@
 
 
 #define  OS_MASTER_FILE                       /* Prevent the following files from including includes.h */
-#include "\software\uCOS-II\source\os_core.c"
-#include "\software\uCOS-II\source\os_mbox.c"
-#include "\software\uCOS-II\source\os_mem.c"
-#include "\software\uCOS-II\source\os_q.c"
-#include "\software\uCOS-II\source\os_sem.c"
-#include "\software\uCOS-II\source\os_task.c"
-#include "\software\uCOS-II\source\os_time.c"
+#include "os_core.c"
+#include "os_mbox.c"
+#include "os_mem.c"
+#include "os_q.c"
+#include "os_sem.c"
+#include "os_task.c"
+#include "os_time.c"
 
