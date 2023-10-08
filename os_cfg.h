@@ -31,7 +31,7 @@
 #define OS_ARG_CHK_EN             0    /* Enable (1) or Disable (0) argument checking                  */
 #define OS_CPU_HOOKS_EN           1    /* uC/OS-II hooks are found in the processor port files         */
 
-#define OS_DEBUG_EN               1    /* Enable(1) debug variables                                    */
+#define OS_DEBUG_EN               0    /* Enable(1) debug variables                                    */
 
 #define OS_EVENT_MULTI_EN         1    /* Include code for OSEventPendMulti()                          */
 #define OS_EVENT_NAME_SIZE       16    /* Determine the size of the name of a Sem, Mutex, Mbox or Q    */
@@ -133,7 +133,7 @@
 
 
                                        /* --------------------- TIMER MANAGEMENT --------------------- */
-#define OS_TMR_EN                 1    /* Enable (1) or Disable (0) code generation for TIMERS         */
+#define OS_TMR_EN                 0    /* Enable (1) or Disable (0) code generation for TIMERS         */
 #define OS_TMR_CFG_MAX           16    /*     Maximum number of timers                                 */
 #define OS_TMR_CFG_NAME_SIZE     16    /*     Determine the size of a timer name                       */
 #define OS_TMR_CFG_WHEEL_SIZE     8    /*     Size of timer wheel (#Spokes)                            */
