@@ -6,24 +6,24 @@ with POSIX **signals + ucontext** instead of assembly. No kernel module, no root
 
 ## Build
 
-    make            # builds TEST + EX1/EX2/EX3 -> <dir>/bin.exec
+    make            # builds EX1/EX2/EX3 + EX5 -> <dir>/bin.exec
     make clean
 
-- Compiler: `gcc -g -m32`. The port is **32-bit i386 only** (see Pitfalls).
+- Compiler: `gcc -g -m32 -x c++`. The port is **32-bit i386 only** (see Pitfalls).
 - On x86_64 Ubuntu 20 this links because multilib is present (libc6:i386 / gcc-multilib).
 - Run an example: `./EX1_x86L/bin.exec` (Ctrl-C to quit).
 
 ## Layout
 
-    ARCH/        the port (replaces the official Ix86L/BC45 OS_CPU_*.{C,ASM})
-      OS_CPU.H     data types, OS_CPU_SR=sigset_t, ENTER/EXIT_CRITICAL, OS_TASK_SW
-      OS_CPU_C.C   stack init, ctx switch, signal handlers, timer setup
-      Utils.{C,H}  console / helpers
+    Port/        the port (replaces the official Ix86L/BC45 OS_CPU_*.{C,ASM})
+      os_cpu.h     data types, OS_CPU_SR=sigset_t, ENTER/EXIT_CRITICAL, OS_TASK_SW
+      os_cpu_c.c   stack init, ctx switch, signal handlers, timer setup
+      utils.{c,h}  console / helpers
     SOURCE/      stock uC/OS-II v2.52 kernel (unchanged, portable C)
-    TEST,EX1..3/ apps; each has its own OS_CFG.H + TEST.C + bin.exec
+    EX1..3,EX5/  apps; each has its own os_cfg.h + TEST.C + bin.exec
     Makefile     gcc -m32, one bin.exec per app dir
 
-## Key functions (ARCH/OS_CPU_C.C, OS_CPU.H)
+## Key functions (Port/os_cpu_c.c, os_cpu.h)
 
     OSTaskStkInit()        build task ucontext (getcontext+makecontext), return ptr as OSTCBStkPtr
     OSStartHighRdy()       start multitasking: setcontext() into first task, never returns
@@ -80,7 +80,7 @@ saves its full register set, and vectors to a handler you registered — exactly
 
 ## Differences vs official v2.52 (git-ucos/uCOS-II, Ix86L/BC45)
 
-- SOURCE/ kernel is byte-for-byte stock; ALL differences live in ARCH/.
+- SOURCE/ kernel is byte-for-byte stock; ALL differences live in Port/.
 - Official port = `OS_CPU_A.ASM` (16-bit real mode, `.186`, LARGE model). This port = **no .asm**, pure C.
 - `OS_STK`: official INT16U (16-bit) vs here INT32U (32-bit). `OS_STK_GROWTH=1` both.
 - Tick: official drives the 8259 + chains DOS every 11th tick (`OSTickDOSCtr`, `INT 81H`, EOI 0x20);
@@ -98,6 +98,10 @@ saves its full register set, and vectors to a handler you registered — exactly
   whether the interrupted EIP is inside `setcontext` (≈110 bytes) and aborting that tick.
   This is a race mitigation, not a fix (author \todo: use `sigreturn`).
 - **fpregs==0 guard**: handler bails if `uc_mcontext.fpregs==0` (Linux i386 quirk mid-restore).
+- **Built as C++ (`-x c++`), not C.** Files are lowercase `.c` but compiled as C++ because
+  the i386 `REG_EIP`/`REG_EBP` macros are GNU-guarded: g++ auto-defines `_GNU_SOURCE`, gcc-as-C
+  does not. Dropping `-x c++` breaks the build (`REG_EIP undeclared`) unless you add `-D_GNU_SOURCE`.
+  Apps (`TEST.C`) and kernel must use the same frontend or C/C++ name mangling fails to link.
 - Timer precision is best-effort (subject to Linux scheduling), fine for the demos.
 - `linuxInit()` (handler setup) runs from `OSInitHookBegin`; `linuxInitInt()` (arm timer)
   MUST be called by the user from the first task, after OSInit — not before multitasking starts.

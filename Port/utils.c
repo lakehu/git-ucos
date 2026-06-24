@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <time.h>
-#include "Utils.h"
+#include "utils.h"
 
 #define  COLOR_BLACK     0         /* VT102 Color Codes  */
 #define  COLOR_RED       1
