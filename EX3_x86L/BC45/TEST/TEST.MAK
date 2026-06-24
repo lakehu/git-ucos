@@ -88,18 +88,18 @@ LINK_FLAGS=
 #                               MISCELLANEOUS
 ###############################################################################
 #
-INCLUDES=      $(SOURCE)\INCLUDES.H  \
-               $(SOURCE)\OS_CFG.H    \
-               $(PORT)\OS_CPU.H      \
+INCLUDES=      $(SOURCE)\includes.h  \
+               $(SOURCE)\os_cfg.h    \
+               $(PORT)\os_cpu.h      \
                $(PC)\PC.H            \
-               $(OS)\uCOS_II.H               
+               $(OS)\ucos_ii.h               
 
 ###############################################################################
 #                          CREATION OF .EXE FILE
 ###############################################################################
 
 $(TARGET)\TEST.EXE:                  \
-               $(WORK)\INCLUDES.H    \
+               $(WORK)\includes.h    \
                $(OBJ)\OS_CPU_A.OBJ   \
                $(OBJ)\OS_CPU_C.OBJ   \
                $(OBJ)\PC.OBJ         \
@@ -125,10 +125,10 @@ $(OBJ)\OS_CPU_A.OBJ:                  \
 
 
 $(OBJ)\OS_CPU_C.OBJ:                  \
-               $(PORT)\OS_CPU_C.C     \
+               $(PORT)\os_cpu_c.c     \
 
-               COPY   $(PORT)\OS_CPU_C.C    OS_CPU_C.C
-               $(CC)  $(C_FLAGS)            OS_CPU_C.C
+               COPY   $(PORT)\os_cpu_c.c    os_cpu_c.c
+               $(CC)  $(C_FLAGS)            os_cpu_c.c
 
 
 $(OBJ)\PC.OBJ:                        \
@@ -140,26 +140,26 @@ $(OBJ)\PC.OBJ:                        \
 
 
 $(OBJ)\TEST.OBJ:                      \
-               $(SOURCE)\TEST.C       \
+               $(SOURCE)\test.c       \
                $(INCLUDES)
 
-               COPY   $(SOURCE)\TEST.C      TEST.C
-               $(CC)  $(C_FLAGS)            TEST.C
+               COPY   $(SOURCE)\test.c      test.c
+               $(CC)  $(C_FLAGS)            test.c
 
 
 $(OBJ)\uCOS_II.OBJ:                   \
-               $(OS)\uCOS_II.C        \
+               $(OS)\ucos_ii.c        \
                $(INCLUDES)
 
-               COPY   $(OS)\uCOS_II.C       uCOS_II.C
-               $(CC)  $(C_FLAGS)            uCOS_II.C
+               COPY   $(OS)\ucos_ii.c       ucos_ii.c
+               $(CC)  $(C_FLAGS)            ucos_ii.c
 
 
-$(WORK)\INCLUDES.H:                   \
+$(WORK)\includes.h:                   \
                $(INCLUDES)
 
-               COPY   $(SOURCE)\INCLUDES.H  INCLUDES.H
-               COPY   $(SOURCE)\OS_CFG.H    OS_CFG.H
+               COPY   $(SOURCE)\includes.h  includes.h
+               COPY   $(SOURCE)\os_cfg.h    os_cfg.h
                COPY   $(PC)\PC.H            PC.H
-               COPY   $(PORT)\OS_CPU.H      OS_CPU.H
-               COPY   $(OS)\uCOS_II.H       uCOS_II.H
+               COPY   $(PORT)\os_cpu.h      os_cpu.h
+               COPY   $(OS)\ucos_ii.h       ucos_ii.h
