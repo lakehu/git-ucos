@@ -9,16 +9,11 @@
 *                                           MASTER INCLUDE FILE
 *********************************************************************************************************
 */
+#ifndef INCLUDES_H
+#define INCLUDES_H
 
-#include    <stdio.h>
-#include    <string.h>
-#include    <ctype.h>
-#include    <stdlib.h>
-#include    <conio.h>
-#include    <dos.h>
-#include    <setjmp.h>
+#include "os_cpu.h"
+#include "os_cfg.h"
+#include "ucos_ii.h"
 
-#include    "\software\ucos-ii\ix86l\bc45\os_cpu.h"
-#include    "os_cfg.h"
-#include    "\software\ucos-ii\source\ucos_ii.h"
-#include    "\software\blocks\pc\bc45\pc.h"
+#endif
