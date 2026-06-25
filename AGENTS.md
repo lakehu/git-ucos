@@ -8,7 +8,7 @@ Refer to https://github.com/ShenChen1/uCOS-II-linux-port.git
 
 ## Build
 
-    make            # builds EX1/EX2/EX3 + EX5 -> <dir>/bin.exec
+    make            # builds EX1/EX2/EX3 + EX4 (FP) + EX5 -> <dir>/bin.exec
     make clean
 
 - Compiler: `gcc -g -m32 -x c++`. The port is **32-bit i386 only** (see Pitfalls).
@@ -23,11 +23,15 @@ Refer to https://github.com/ShenChen1/uCOS-II-linux-port.git
       utils.{c,h}  console / helpers
     SOURCE/      stock uC/OS-II v2.52 kernel (unchanged, portable C)
     EX1..3,EX5/  apps; each has its own os_cfg.h + TEST.C + bin.exec
-    Makefile     gcc -m32, one bin.exec per app dir
+    EX4_x86L.FP/ floating-point app; gcc/SOURCE/ holds the Linux port,
+                 BC45/ keeps the untouched Borland DOS original. Builds with -lm.
+    Makefile     gcc -m32, one bin.exec per app dir; delegates to each EXn/Makefile
 
 ## Key functions (Port/os_cpu_c.c, os_cpu.h)
 
     OSTaskStkInit()        build task ucontext (getcontext+makecontext), return ptr as OSTCBStkPtr
+    OSTaskStkInit_FPE_x86() [Port/utils.c] runs `fninit` to clear the x87 FPU; an FP task must
+                           call it at entry (see FP pitfall). No-op for the non-FP examples.
     OSStartHighRdy()       start multitasking: setcontext() into first task, never returns
     OSCtxSw()              voluntary switch: setcontext(OSTCBHighRdy ucontext)
     OSIntCtxSw()           ISR-level switch; == OSCtxSw() (no separate ISR frame)
@@ -88,7 +92,8 @@ saves its full register set, and vectors to a handler you registered — exactly
 - Tick: official drives the 8259 + chains DOS every 11th tick (`OSTickDOSCtr`, `INT 81H`, EOI 0x20);
   here `ualarm`/SIGALRM only — no PIC, no DOS, no EOI.
 - Register save: official explicit `PUSHA/PUSH ES/DS`; here implicit via kernel-delivered ucontext.
-- An FP variant exists upstream (Ix86L-FP, `OSTaskStkInit_FPE_x86`); not ported here.
+- An FP variant exists upstream (Ix86L-FP, `OSTaskStkInit_FPE_x86`); ported here as EX4_x86L.FP
+  (see FP pitfall for the two Linux-port-specific fixes it needed).
 
 ## Pitfalls
 
@@ -108,6 +113,16 @@ saves its full register set, and vectors to a handler you registered — exactly
 - Timer precision is best-effort (subject to Linux scheduling), fine for the demos.
 - `linuxInit()` (handler setup) runs from `OSInitHookBegin`; `linuxInitInt()` (arm timer)
   MUST be called by the user from the first task, after OSInit — not before multitasking starts.
+- **FP tasks need a clean x87 at entry (EX4).** `OSTaskStkInit()` snapshots the FPU via
+  `getcontext()` while building each task's context, so every task inherits `main()`'s *dirty*
+  x87 tag word (all 8 regs marked in-use). The first `cos()`/`sin()` then overflows the x87
+  stack → **SIGFPE**. glibc `makecontext` does NOT carry a getcontext FPU snapshot on i386, so
+  fixing it inside the port is not enough — the FP task must call `OSTaskStkInit_FPE_x86()`
+  (`fninit`) as its first statement. Only EX4 hits this (only example doing FP in tasks).
+- **DOS stacks are too small for the ucontext port (EX4).** The Linux port runs real host code
+  (scheduler, `sprintf`, `sigprocmask`) on each task stack, but the DOS originals size idle/stat
+  stacks at 512 `OS_STK` entries (2 KB) → **SIGSEGV** in the stat task. Size stacks from
+  `OS_TASK_DEF_STK_SIZE` (2000), not the DOS literal.
 
 ## Verify after changes
 
