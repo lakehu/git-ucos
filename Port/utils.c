@@ -37,7 +37,22 @@ void PC_GetDateTime(char* s) {
 	gettimeofday(&x, NULL);
 	ctime_r(&x.tv_sec, s);
 }
-void OSTaskStkInit_FPE_x86() {}
+/*
+*********************************************************************************************************
+*                            GIVE THE CALLING TASK A CLEAN x87 FPU STATE
+*
+* Description: OSTaskStkInit() builds each task's context with getcontext(), which snapshots the
+*              CREATOR's live x87 FPU.  If the creator's FPU tag word marks the register stack as
+*              occupied, the new task inherits that state and its first floating-point push overflows
+*              the x87 stack  ->  SIGFPE.  Calling this routine at the top of a floating-point task
+*              issues FNINIT, resetting the FPU so the task starts with an empty register stack.
+*
+*              This is the Linux/POSIX-port equivalent of what the original Borland Ix86L-FP port did
+*              via OS_TASK_OPT_SAVE_FP (FSAVE/FRSTOR).  Non-FP examples (EX1/EX2/EX3/EX5) never call
+*              this routine, so they are completely unaffected.
+*********************************************************************************************************
+*/
+void OSTaskStkInit_FPE_x86() { __asm__ __volatile__("fninit"); }
 
 void PC_VectSet(int x, void* f) {
 	linuxInitInt();

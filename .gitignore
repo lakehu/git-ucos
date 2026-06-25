@@ -1,1 +1,8 @@
+bin.exec
+a.out
+*.a
+*.o
+*.obj
+*.elf
 *.exe
+*.dll
