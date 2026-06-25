@@ -34,6 +34,27 @@
 #include <stdio.h>    // if we want to use printf...
 
 
+/*--------------------------------------------------------------------------
+ * Per-task saved-context slots (Linux port aliasing fix).
+ *
+ * Bug being fixed: the original handlers did
+ *     OSTCBCur->OSTCBStkPtr = (OS_STK *)uc;
+ * where `uc` is a pointer the kernel placed onto the *task's own stack*
+ * when delivering the signal. The task kept running on that stack, so a
+ * later signal delivery (or nested handler) would overwrite the live
+ * ucontext frame -> *** stack smashing detected *** / SIGSEGV.
+ *
+ * Fix: keep one ucontext_t per priority outside the task's stack, and
+ * memcpy(*uc) into it before stashing the pointer in the TCB. The
+ * task's stack is no longer used as backing storage for the saved
+ * register set.
+ *
+ * Size: OS_LOWEST_PRIO+1 slots (uC/OS-II indexes TCBs by priority).
+ * sizeof(ucontext_t) on i386 glibc ~= 364 bytes -> ~23 KB for 64 prios.
+ *--------------------------------------------------------------------------*/
+static ucontext_t g_saved_uc[OS_LOWEST_PRIO + 1];
+
+
 /**                                 INITIALIZE A TASK'S STACK
  *
  * This function is called by either OSTaskCreate() or OSTaskCreateExt() to
@@ -149,7 +170,11 @@ void OSCtxSwSigHandler(int signo, siginfo_t* info, /*struct ucontext* */ void* u
 {
     /** Linux specific module variable of current signal context, i.e. interrupted thread
      */
-    OSTCBCur->OSTCBStkPtr = (OS_STK *)uc; //stk;
+    /* Fix: copy *uc into a TCB-owned slot instead of aliasing the task's
+     * own stack (see g_saved_uc[] note at top of file). */
+    INT8U prio = OSTCBCur->OSTCBPrio;
+    memcpy(&g_saved_uc[prio], uc, sizeof(ucontext_t));
+    OSTCBCur->OSTCBStkPtr = (OS_STK *)&g_saved_uc[prio];
 
     OSCtxSw();
 }
@@ -202,7 +227,13 @@ void OSTimeTickSigHandler(int signo, siginfo_t* info, /*struct ucontext* */ void
         //fprintf(stderr, "sig timer: uc->uc_mcontext.fpregs == 0\n");
         return;
     }
-    OSTCBCur->OSTCBStkPtr = (OS_STK *)uc; //stk;
+    /* Fix: copy *uc into a TCB-owned slot instead of aliasing the task's
+     * own stack (see g_saved_uc[] note at top of file). */
+    {
+        INT8U prio = OSTCBCur->OSTCBPrio;
+        memcpy(&g_saved_uc[prio], uc, sizeof(ucontext_t));
+        OSTCBCur->OSTCBStkPtr = (OS_STK *)&g_saved_uc[prio];
+    }
     OSTickISR();
     // restore context
 }
@@ -234,15 +265,42 @@ void linuxInit()
     struct sigaction act;
     sigset_t mask;
 
+    /* Fix part 2: install an alternate signal stack so the kernel does NOT
+     * push ucontext/siginfo/xsave frames onto the *task's own stack* on
+     * signal delivery. Without this, even with the aliasing fix, the
+     * kernel's signal-frame write can clobber SSP canaries that libc
+     * functions (e.g. sigprocmask called from OS_EXIT_CRITICAL) placed on
+     * the task's stack just before being interrupted -> *** stack smashing
+     * detected *** in OS_TaskIdle. With SIGSTKSZ alternate stack +
+     * SA_ONSTACK, all handler-side stack usage moves off-task. */
+    {
+        static char altstack[SIGSTKSZ];   /* lives forever; not on any task stack */
+        stack_t ss;
+        ss.ss_sp = altstack;
+        ss.ss_size = SIGSTKSZ;
+        ss.ss_flags = 0;
+        sigaltstack(&ss, NULL);
+    }
+
+    /* Fix part 1 (mask): each handler must mask BOTH SIGALRM and SIGUSR1
+     * while it runs, otherwise the other signal can nest into it and the
+     * inner handler overwrites the outer handler's ucontext frame on the
+     * task's stack (saw this as OSCtxSwSigHandler frame at
+     * OSTaskStatStk+3532 with OSTimeTickSigHandler frame at +396 below it
+     * -> SIGSEGV). */
     sigemptyset(&mask);
+    sigaddset(&mask, SIGALRM);
+    sigaddset(&mask, SIGUSR1);
     act.sa_sigaction = OSTimeTickSigHandler;
-    act.sa_flags = SA_SIGINFO;// | SA_ONSTACK;
+    act.sa_flags = SA_SIGINFO | SA_ONSTACK;
     act.sa_mask = mask;
     sigaction(SIGALRM, &act, NULL);
 
     sigemptyset(&mask);
+    sigaddset(&mask, SIGALRM);
+    sigaddset(&mask, SIGUSR1);
     act.sa_sigaction = OSCtxSwSigHandler;
-    act.sa_flags = SA_SIGINFO;// | SA_ONSTACK;
+    act.sa_flags = SA_SIGINFO | SA_ONSTACK;
     act.sa_mask = mask;
     sigaction(SIGUSR1, &act, NULL);
 }
