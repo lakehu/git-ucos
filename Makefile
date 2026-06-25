@@ -16,17 +16,14 @@ all: $(EXEC_1) $(EXEC_2) $(EXEC_3) $(EXEC_5)
 $(EXEC_1):  #delegate to per-example gcc Makefile
 	$(MAKE) -C EX1_x86L
 
-$(EXEC_2):$(SRCS)  #complie appcation
-	$(CC) $(CFLAGS) $(SRCS) -I./EX2_x86L ./EX2_x86L/TEST.C -o $(EXEC_2) 
-	@echo "-- Build Target Appcation ($(EXEC_2)) Successful --"
+$(EXEC_2):  #delegate to per-example gcc Makefile
+	$(MAKE) -C EX2_x86L
 
-$(EXEC_3):$(SRCS)  #complie appcation
-	$(CC) $(CFLAGS) $(SRCS) -I./EX3_x86L ./EX3_x86L/TEST.C -o $(EXEC_3) 
-	@echo "-- Build Target Appcation ($(EXEC_3)) Successful --"
+$(EXEC_3):  #delegate to per-example gcc Makefile
+	$(MAKE) -C EX3_x86L
 
-$(EXEC_5):$(SRCS)  #complie appcation
-	$(CC) $(CFLAGS) $(SRCS) -I./EX5_x86L ./EX5_x86L/TEST.C -o $(EXEC_5) 
-	@echo "-- Build Target Appcation ($(EXEC_5)) Successful --"
+$(EXEC_5):  #delegate to per-example gcc Makefile
+	$(MAKE) -C EX5_x86L
 
 clean:
 	@echo ">>>>>>>>>>>> make clean <<<<<<<<<<<<<<"
