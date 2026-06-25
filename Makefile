@@ -13,9 +13,8 @@ EXEC_5 = ./EX5_x86L/bin.exec
 
 all: $(EXEC_1) $(EXEC_2) $(EXEC_3) $(EXEC_5) 
 
-$(EXEC_1):$(SRCS)  #complie appcation
-	$(CC) $(CFLAGS) $(SRCS) -I./EX1_x86L ./EX1_x86L/TEST.C -o $(EXEC_1) 
-	@echo "-- Build Target Appcation ($(EXEC_1)) Successful --"
+$(EXEC_1):  #delegate to per-example gcc Makefile
+	$(MAKE) -C EX1_x86L
 
 $(EXEC_2):$(SRCS)  #complie appcation
 	$(CC) $(CFLAGS) $(SRCS) -I./EX2_x86L ./EX2_x86L/TEST.C -o $(EXEC_2) 
