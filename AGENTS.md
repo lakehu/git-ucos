@@ -98,10 +98,11 @@ saves its full register set, and vectors to a handler you registered — exactly
 - **32-bit only.** Context code hard-codes i386: `gregs[REG_EIP]`, `REG_EBP`, and pointer
   math cast through `int` (`(INT32U*)((int)ptos - …)`). Native x86_64 would truncate
   pointers and has `REG_RIP`, not `REG_EIP`. Hence `-m32`; needs i386 multilib to build/run.
-- **setcontext is not atomic on i386** (userspace register restore, not a syscall). If SIGALRM
-  fires inside it the context is half-restored. `OSTimeTickSigHandler` guards by checking
-  whether the interrupted EIP is inside `setcontext` (≈110 bytes) and aborting that tick.
-  This is a race mitigation, not a fix (author \todo: use `sigreturn`).
+- **setcontext is not atomic on i386** — see "Signal-handler races" section below
+  for full root-cause analysis. Short form: userspace register restore, not a
+  syscall; SIGALRM landing inside its ~110-byte window leaves the context
+  half-restored. Mitigated by `OSTimeTickSigHandler` aborting any tick whose
+  interrupted EIP falls inside `setcontext`. Not a fix (author \todo: use `sigreturn`).
 - **fpregs==0 guard**: handler bails if `uc_mcontext.fpregs==0` (Linux i386 quirk mid-restore).
 - **Built as C++ (`-x c++`), not C.** Files are lowercase `.c` but compiled as C++ because
   the i386 `REG_EIP`/`REG_EBP` macros are GNU-guarded: g++ auto-defines `_GNU_SOURCE`, gcc-as-C
@@ -126,3 +127,126 @@ saves its full register set, and vectors to a handler you registered — exactly
     make clean && make
     file ./EX1_x86L/bin.exec        # expect: ELF 32-bit LSB, Intel 80386
     ./EX1_x86L/bin.exec             # expect Labrosse banner, rising #Task switch/sec
+
+## Signal-handler races (Port/os_cpu_c.c)
+
+Symptom: intermittent `*** stack smashing detected ***` (SIGABRT) or SIGSEGV,
+most commonly in EX4 (FP), with backtrace
+`__stack_chk_fail → sigprocmask → OS_TaskIdle:922`. Pre-fix crash rate on EX4
+was ~20 % per 2 s run; post-fix ~5 % (residual race 4).
+
+Root cause is **four** independent issues sharing one symptom — the signal-handling
+machinery silently corrupts the interrupted task's stack or the saved register state.
+Reproducer: `~/.hermes/skills/embedded/ucos-linux-port-debugging/scripts/stress.sh`.
+
+### Race 1 — saved-ucontext aliasing (FIXED)
+
+Original:
+```c
+OSTCBCur->OSTCBStkPtr = (OS_STK *)uc;   // uc points INTO the task's own stack
+```
+The kernel writes the signal frame (ucontext+siginfo+xsave, ~700 B) onto the
+preempted task's stack and hands the handler a pointer `uc` into that area.
+Storing `uc` in the TCB means "the saved register set" and "the live task
+stack" alias each other. The very next signal delivery (or any deep stack
+use by the task) overwrites the saved state.
+
+**Fix**: per-priority TCB-owned slot, decoupled from any task stack:
+```c
+static ucontext_t g_saved_uc[OS_LOWEST_PRIO + 1];
+memcpy(&g_saved_uc[OSTCBCur->OSTCBPrio], uc, sizeof(ucontext_t));
+OSTCBCur->OSTCBStkPtr = (OS_STK *)&g_saved_uc[OSTCBCur->OSTCBPrio];
+```
+Applied to both `OSCtxSwSigHandler` and `OSTimeTickSigHandler`. Cost ≈ 23 KB
+for 64 priorities.
+
+### Race 2 — empty sa_mask, SIGALRM ⇄ SIGUSR1 nest (FIXED)
+
+Original `linuxInit()` did `sigemptyset(&mask); act.sa_mask = mask;` for both
+handlers. SIGUSR1 could land inside the SIGALRM handler (or vice versa);
+the inner handler then writes its own ucontext frame onto the task stack on
+top of the outer handler's frame. Saw this directly in cores as two stacked
+handler frames inside `OSTaskStatStk` before the crash.
+
+**Fix**: each handler masks BOTH signals while it runs:
+```c
+sigemptyset(&mask);
+sigaddset(&mask, SIGALRM);
+sigaddset(&mask, SIGUSR1);
+act.sa_mask = mask;
+```
+
+### Race 3 — kernel writes signal frames on task stack (FIXED)
+
+Even with the aliasing fixed and signals serialized, **the kernel still writes
+the ~700 B signal frame onto the task's own stack** on every delivery, because
+no alternate stack was installed. When that write lands on top of an SSP canary
+that libc placed just before the task got preempted (e.g. inside `sigprocmask`
+called from `OS_EXIT_CRITICAL`), the canary changes value → `__stack_chk_fail`
+the moment libc returns. This is the dominant cause of the
+`OS_TaskIdle:922 → sigprocmask` crash.
+
+The original `linuxInit()` had `// | SA_ONSTACK` commented out — intent was
+there but `sigaltstack()` was never wired up.
+
+**Fix**: install a persistent alternate stack and add `SA_ONSTACK`:
+```c
+static char altstack[SIGSTKSZ];
+stack_t ss = { .ss_sp = altstack, .ss_size = SIGSTKSZ, .ss_flags = 0 };
+sigaltstack(&ss, NULL);
+act.sa_flags = SA_SIGINFO | SA_ONSTACK;
+```
+All handler-side stack usage (and the kernel's signal-frame push) now goes to
+`altstack[]`, off any task stack.
+
+### Race 4 — setcontext non-atomicity (NOT FIXED, residual ~5 %)
+
+The port author flagged this directly in three places in `Port/os_cpu_c.c`:
+
+1. `OSCtxSw()` doxygen (~lines 141-143):
+   ```
+   \todo setcontext is a user space implementation of calling sigprocmask and then
+   restoring registers; should try (ugly) hack using sigreturn which is a real syscall
+   ```
+2. `OSTimeTickSigHandler()` doxygen (~lines 206-213):
+   ```
+   \todo this handler maybe executed during a restore (i.e. setcontext()) call.
+   This is a problem with the setcontext() user space implementation in Linux i386.
+   Most SysV and Linux RISC systems don't have this. The tests below are an
+   indication that this situatiuon has occured; the SIGALRM is then aborted...
+   \todo If this is not fixed by adding a Linux syscall for get/setcontext, a user
+   level implementation with an 'clock interrupt' lock should be used
+   ```
+3. The shipped mitigation (~lines 221-225) — an EIP-range guard that aborts SIGALRM
+   if the interrupted PC is inside `setcontext`'s ~110-byte window:
+   ```c
+   if (eip >= (uint)setcontext && eip < (uint)setcontext + 110) return;
+   ```
+
+Mechanism: glibc i386 `setcontext` is a userspace sequence —
+`sigprocmask(restore_mask)` then a register restore — **not** a syscall.
+A SIGALRM landing inside that sequence (especially after the mask restore
+but before the register restore completes) sees a partially-restored CPU
+state. The 110-byte guard catches *most* but not all PC positions in the
+window (it does not cover the `sigprocmask` call inside `setcontext`
+itself, nor cases where the PC has already returned).
+
+**Proper fix** is the author's plan: replace `setcontext(uc)` with a
+hand-rolled wrapper that builds a kernel-style signal frame and invokes the
+real `sigreturn` syscall — atomic mask+register restore. That is a port
+rewrite, not a small patch, so it is left unfixed; residual ~5 % crash rate
+on EX4 stress is accepted.
+
+### Detection / verification
+
+Apport silently throttles core dumps under high crash rates, so **count
+crashes from the run logs**, not from new cores:
+```bash
+grep -l 'stack smashing' /tmp/ucos_stress/*.log | wc -l
+```
+On a fresh build, three sanity bars:
+- EX1/EX2/EX3 must run 2 s clean (rc=124 from `timeout`).
+- EX4 default load: expect ≤ 2 crashes per 40 × 2 s runs (race 4 residual).
+- EX5 default load: 0 crashes per 20 × 2 s runs.
+
+Anything worse means a regression in races 1-3 was reintroduced.
