@@ -1,0 +1,50 @@
+; dump_linclk.cmm - Dump LINFlexD0 clock and baud registers
+; Run after s32g274_m7.cmm has executed (sys.mode prepare or attach)
+
+LOCAL &pllsr &plldv &pllfd &pllodiv3 &mux8css &ibrr &fbrr &uartcr &lincr1 &mscr41 &mscr42 &imcr0
+
+; PERIPH_PLL registers
+&pllsr=Data.Long(eaxi:0x4003C004)
+&plldv=Data.Long(eaxi:0x4003C008)
+&pllfd=Data.Long(eaxi:0x4003C010)
+&pllodiv3=Data.Long(eaxi:0x4003C08C)
+
+; MC_CGM_0 MUX_8
+&mux8css=Data.Long(eaxi:0x40030504)
+
+; LINFlexD0
+&ibrr=Data.Long(eaxi:0x401C8028)
+&fbrr=Data.Long(eaxi:0x401C8024)
+&uartcr=Data.Long(eaxi:0x401C8010)
+&lincr1=Data.Long(eaxi:0x401C8000)
+
+; SIUL2_0 pads + IMCR
+&mscr41=Data.Long(eaxi:0x4009C2E4)
+&mscr42=Data.Long(eaxi:0x4009C2E8)
+&imcr0=Data.Long(eaxi:0x4009CA40)
+
+PRINT ""
+PRINT "===== PERIPH_PLL ====="
+PRINT "  PLLSR    (0x4003C004): 0x" &pllsr " LOCK=" ((&pllsr>>2.)&1.)
+PRINT "  PLLDV    (0x4003C008): 0x" &plldv " MFI=" (&plldv&0xFF) " RDIV=" ((&plldv>>12.)&0x7)
+PRINT "  PLLFD    (0x4003C010): 0x" &pllfd
+PRINT "  PLLODIV3 (0x4003C08C): 0x" &pllodiv3 " DE=" ((&pllodiv3>>31.)&1.) " DIV=" ((&pllodiv3>>16.)&0x3F)
+PRINT ""
+PRINT "===== MC_CGM_0 MUX_8 ====="
+PRINT "  CSS      (0x40030504): 0x" &mux8css " SELSTAT=" ((&mux8css>>24.)&0x3F)
+PRINT ""
+PRINT "===== LINFlexD0 ====="
+PRINT "  LINCR1   (0x401C8000): 0x" &lincr1 " INIT=" (&lincr1&1.) " SLEEP=" ((&lincr1>>1.)&1.)
+PRINT "  UARTCR   (0x401C8010): 0x" &uartcr " UART=" (&uartcr&1.) " RXEN=" ((&uartcr>>5.)&1.) " TXEN=" ((&uartcr>>4.)&1.)
+PRINT "  LINFBRR  (0x401C8024): 0x" &fbrr " FBR=" (&fbrr&0xF)
+PRINT "  LINIBRR  (0x401C8028): 0x" &ibrr " IBR=" (&ibrr&0xFFFF)
+PRINT ""
+PRINT "===== SIUL2_0 Pads + IMCR ====="
+PRINT "  MSCR[41] TX (0x4009C2E4): 0x" &mscr41 " SSS=" (&mscr41&0xF) " OBE=" ((&mscr41>>21.)&1.)
+PRINT "  MSCR[42] RX (0x4009C2E8): 0x" &mscr42 " IBE=" ((&mscr42>>19.)&1.)
+PRINT "  IMCR[0]     (0x4009CA40): 0x" &imcr0 " SSS=" (&imcr0&0xF)
+PRINT "  VCO = FXOSC(40MHz) * MFI / RDIV = " (40.*(&plldv&0xFF)/((&plldv>>12.)&0x7)) " MHz"
+PRINT "  PHI3 = VCO / (DIV+1) = " (40.*(&plldv&0xFF)/((&plldv>>12.)&0x7)/(((&pllodiv3>>16.)&0x3F)+1.)) " MHz"
+PRINT "  Baud ~ 115200 (IBR=67, FBR=13, PHI3=125MHz)"
+
+ENDDO

@@ -1,0 +1,45 @@
+; dump_linflexd0.cmm — Dump all LINFlexD_0 registers + SIUL2 pad/IMCR for UART
+; Run this AFTER init is complete (break after s32g_linflexd_init returns)
+;
+; Usage: compare between bootloader running and FreeRTOS running
+
+AREA.Create UART
+AREA.Select UART
+AREA.Clear UART
+AREA.view UART
+
+PRINT "========== LINFlexD_0 (0x401C8000) =========="
+PRINT "LINCR1   (0x00): " Data.Long(ASD:0x401C8000)
+PRINT "LINIER   (0x04): " Data.Long(ASD:0x401C8004)
+PRINT "LINSR    (0x08): " Data.Long(ASD:0x401C8008)
+PRINT "LINESR   (0x0C): " Data.Long(ASD:0x401C800C)
+PRINT "UARTCR   (0x10): " Data.Long(ASD:0x401C8010)
+PRINT "UARTSR   (0x14): " Data.Long(ASD:0x401C8014)
+PRINT "LINTCSR  (0x18): " Data.Long(ASD:0x401C8018)
+PRINT "LINOCR   (0x1C): " Data.Long(ASD:0x401C801C)
+PRINT "LINTOCR  (0x20): " Data.Long(ASD:0x401C8020)
+PRINT "LINFBRR  (0x24): " Data.Long(ASD:0x401C8024)
+PRINT "LINIBRR  (0x28): " Data.Long(ASD:0x401C8028)
+PRINT "LINCFR   (0x2C): " Data.Long(ASD:0x401C802C)
+PRINT "LINCR2   (0x30): " Data.Long(ASD:0x401C8030)
+PRINT "BIDR     (0x34): " Data.Long(ASD:0x401C8034)
+PRINT "BDRL     (0x38): " Data.Long(ASD:0x401C8038)
+PRINT "BDRM     (0x3C): " Data.Long(ASD:0x401C803C)
+PRINT ""
+PRINT "========== SIUL2_0 Pads =========="
+PRINT "MSCR[41] PC_09 TX (0x4009C2E4): " Data.Long(ASD:0x4009C2E4)
+PRINT "MSCR[42] PC_10 RX (0x4009C2E8): " Data.Long(ASD:0x4009C2E8)
+PRINT "MSCR[512] IMCR LIN0_RX (0x4009CA40): " Data.Long(ASD:0x4009CA40)
+PRINT ""
+PRINT ""
+PRINT "========== Decode =========="
+&uartcr=Data.Long(ASD:0x401C8010)
+&uartsr=Data.Long(ASD:0x401C8014)
+&lincr1=Data.Long(ASD:0x401C8000)
+PRINT "  LINCR1: INIT=" (&lincr1&0x1) " SLEEP=" ((&lincr1>>12.)&1) " MBL=" ((&lincr1>>7.)&1)
+PRINT "  UARTCR: UART=" (&uartcr&1) " WL0=" ((&uartcr>>1.)&1) " TXEN=" ((&uartcr>>4.)&1) " RXEN=" ((&uartcr>>5.)&1) " RDFL=" ((&uartcr>>10.)&0x7) " TDFL=" ((&uartcr>>13.)&0x7)
+PRINT "  UARTSR: DTF=" ((&uartsr>>1.)&1) " DRF=" ((&uartsr>>2.)&1) " RMB=" ((&uartsr>>9.)&1)
+PRINT ""
+PRINT "Done. Compare these values between bootloader and FreeRTOS."
+
+ENDDO

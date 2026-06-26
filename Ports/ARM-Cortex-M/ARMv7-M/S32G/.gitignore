@@ -1,0 +1,9 @@
+
+build/
+*.o
+*.elf
+*.a
+*.obj
+*.map
+*.lst
+

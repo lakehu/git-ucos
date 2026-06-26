@@ -1,0 +1,1595 @@
+;  Copyright 2022 NXP
+;
+;  NXP Confidential. This software is owned or controlled by NXP and may only be used strictly
+;  in accordance with the applicable license terms.  By expressly accepting
+;  such terms or by downloading, installing, activating and/or otherwise using
+;  the software, you are agreeing that you have read, and that you agree to
+;  comply with and are bound by, such license terms.  If you do not agree to
+;  be bound by the applicable license terms, then you may not retain,
+;  install, activate or otherwise use the software.
+;
+;  This file contains sample code only. It is not part of the production code deliverables.
+;========================================================================
+LOCAL &load_to
+LOCAL &elf_file
+LOCAL &cpu_device
+LOCAL &core_no
+LOCAL &load_params
+LOCAL &multicore
+LOCAL &core_list
+
+ENTRY &load_to &elf_file &cpu_device &core_no &multicore &load_params &core_list
+&cpu_device="S32G274A" 
+&elf_file="..\build\ucos_s32g.elf"        						;path to elf file (uC/OS-II build output; was ..\Output\image.elf in the FreeRTOS demo)
+
+&optimizeFLSMODE=0
+&optimizeSECTORS=0
+&optimizeRAM=0
+&optimizePLL=0
+
+LOCAL &QSPI_BASE
+LOCAL &QSPI_Cntl_BASE
+&QSPI_BASE=0x00000000
+&QSPI_Cntl_BASE=0x40134000
+
+;plist
+;pbreak.set 30.
+
+JTAG.PIN NRESET 0
+JTAG.PIN NTRST 0
+WAIT 10ms
+JTAG.PIN NRESET 1
+JTAG.PIN NTRST 1
+WAIT 10ms
+
+; Boot on E2 samples, assume M7-HSE is not accessible anymore, the M7_0 should have clock
+; but is not booted when there is no IVT, so it has to be manually booted through AXI interface
+
+system.down
+sys.Reset
+symbol.sourcepath.reset
+sys.cpu &cpu_device-M7
+SYStem.config.debugporttype JTAG
+SYStem.Option TRST OFF
+trace.DISABLE
+ETM.OFF
+ITM.OFF
+sys.Option DisMode THUMB
+SYStem.JtagClock 40MHz
+sys.MemAccess AXI
+SYStem.Option DUALPORT ON
+SYStem.Option.ResBreak OFF
+sys.mode prepare
+wait 400ms  ; wait for bootrom to copy the application image, if applicable
+
+GOSUB InitSramEccViaRAMCtrl
+GOSUB DisableSWTWatchdog
+GOSUB SetupLINBaudClock
+
+IF "&load_params"=="NEXUS_INIT"
+(
+    PRIVATE &basedir
+    PRIVATE &scriptdir
+    &basedir=OS.PresentPracticeDirectory()
+    &scriptdir="&basedir\s32g2xx_m7.cmm"
+ 
+    print "[&scriptdir]Intiailze ETR1"
+    ; Set up a memory buffer to use ETR. For GUI, use "Trace > ETR utility ..."
+    ; Base address lies in int_ram
+    ; RSZ = hex(actual_size_in_bytes) / 4
+    Onchip.DISable
+ 
+    ; PER.Set.simple EDAP:0x80030118 %Long 0x34100000 ; Base address: 0x341FE000
+    ; PER.Set.simple EDAP:0x80030004 %Long 0x00100000 ; Size: 4MB
+    PER.Set.simple EDAP:0x80030118 %Long 0x34600000 ; Base address: 0x34300000
+    PER.Set.simple EDAP:0x80030004 %Long 0x000BF800 ; Size: ~3MB
+ 
+    Onchip.TraceCONNECT ETR1 ; Set ETR1 as trace method
+    ; End setup ETR
+
+    Trace.METHOD Onchip
+    Trace.OFF
+    TPIU.PortMode Wrapped
+    ETM.Trace ON
+    ETM.COND ALL
+    ETM.ON
+    Data.Set EDAP:0x80053000 %LE %Long 0x00000003
+    ETM.TimeStampsTrace ON
+    ETM.TImeMode AsyncTimeStamps
+    ETM.TimeStampCLOCK 400MHz
+    Trace.AutoInit ON
+)
+
+data.load.elf &elf_file /GLOBTYPES /AnySym /NoCode
+;; Writing loop to self instruction to memory
+D.S eaxi:0x34000000 %LE %Long 0x34000100
+D.S eaxi:0x34000004 %LE %Long 0x34000025
+D.S eaxi:0x34000024 %LE %Long 0xFFFEF7FF
+
+LOCAL &core0 &core1 &core2
+&core0=0x4
+&core1="undefined"
+&core2="undefined"
+
+IF "&multicore"!="ON"
+(
+  ;&core0 = (STRing.CHAR("&core_no",STRing.LENgth("&core_no")-1)-30)
+  &core0 = "0x4"
+)
+ELSE
+(
+  ;&multicore=="ON", multiple T32 windows attached to EU_CORE_LIST
+
+  ; map the logical cores to the cores in EU_CORE_LIST. Ex: (0,1)
+  IF ((STRing.CHAR("&core_list",1)-30)>=0)&&((STRing.CHAR("&core_list",1)-30)<9)
+  (
+    &core0=(STRing.CHAR("&core_list",1)-30)
+  )
+  IF ((STRing.CHAR("&core_list",3)-30)>=0)&&((STRing.CHAR("&core_list",3)-30)<9)
+  (
+    &core1=(STRing.CHAR("&core_list",3)-30)
+  )
+  IF ((STRing.CHAR("&core_list",5)-30)>=0)&&((STRing.CHAR("&core_list",5)-30)<9)
+  (
+    &core2=(STRing.CHAR("&core_list",5)-30)
+  )
+)
+
+;current core,master.
+IF ("&core0"!="undefined")
+(
+  IF ("&core0"=="0x4")
+  (
+    GOSUB EnableCM7_0    
+    sys.cpu &cpu_device-M7-0
+    ;SYStem.Down
+    ;CORE.ASSIGN 1.
+    ;SYStem.Up
+  )  
+  ELSE IF ("&core0"=="0x5")
+  (
+    ;create a temparory vector table ?
+    GOSUB EnableCM7_1    
+    sys.cpu &cpu_device-M7-1 
+  )  
+  ELSE IF ("&core0"=="0x6")
+  (
+    GOSUB EnableCM7_2    
+    sys.cpu &cpu_device-M7-2
+  )  
+  ELSE
+  (
+    GOSUB EnableCM7_0    
+    sys.cpu &cpu_device-M7-0
+  )
+  
+  sys.attach
+  WAIT 200ms  ; wait to allow the boot core to boot from sd card in case needed.
+  break
+  TrOnchip.Set MMERR OFF
+  data.load.elf &elf_file /GLOBTYPES /AnySym
+  ; Set this variable to catch the core in a busy-wait loop
+)
+
+
+IF ("&core1"!="undefined")
+(
+  ;IF ("&core1"=="&core0")
+  ;(
+  ;  STOP "Core 1 should be different than Core0"
+  ;)
+
+  &core1=0x5
+  TargetSystem.NewInstance Core_1 /ARCHitecture ARM
+
+  InterCom.execute ALL SYnch.Connect OTHERS   ;workaround to avoid "Intercom resolve port name error"
+  IF (intercom.ping(localhost:10001))
+  (
+    intercom.wait localhost:10001
+
+    IF ("&core1"=="0x4")
+    (
+      GOSUB EnableCM7_0   
+      intercom.execute localhost:10001 sys.cpu &cpu_device-M7-0
+    )
+    ELSE IF ("&core1"=="0x5")
+    (
+      GOSUB EnableCM7_1    
+      InterCom Core_1 sys.cpu &cpu_device-M7
+      ;intercom.execute localhost:10001
+      InterCom Core_1 CORE.ASSIGN 2.
+      ;InterCom Core_1 system.config.core 2. 1.
+    )  
+    ELSE IF ("&core1"=="0x6")
+    (
+      GOSUB EnableCM7_2    
+      intercom.execute localhost:10001 sys.cpu &cpu_device-M7-2
+    )  
+    ELSE
+    (
+      GOSUB EnableCM7_0    
+      intercom.execute localhost:10001 sys.cpu &cpu_device-M7-0
+    )
+    
+    ;&core1="intercom.execute localhost:10001"
+
+    InterCom Core_1 system.down
+    ;InterCom Core_1 sys.Reset
+    InterCom Core_1 SYStem.Option ResBreak off
+    ;InterCom Core_1 SYStem.Option TRST off
+    ;InterCom Core_1 system.config debugporttype jtag
+    InterCom Core_1 SYStem.Option DUALPORT ON
+    InterCom Core_1 SYSTEM.JTAGclock 5mhz
+    InterCom Core_1 trace.DISABLE
+    InterCom Core_1 ETM.OFF
+    InterCom Core_1 ITM.OFF
+    InterCom Core_1 sys.Option DisMode THUMB
+    InterCom Core_1 sys.attach
+    InterCom Core_1 break
+	  InterCom Core_1 TrOnchip.Set MMERR OFF
+    ;InterCom Core_1 R.S T 1
+
+    InterCom Core_1 data.load.elf &elf_file /GLOBTYPES /AnySym /NOCode
+    InterCom Core_1 system.MemAccess.denied 
+    InterCom Core_1 register.set pc Reset_Handler
+    InterCom Core_1 data.list 
+
+    InterCom Core_1 go main
+  )
+  InterCom.execute ALL SYnch.Connect NONE
+)
+
+IF ("&core2"!="undefined")
+(
+  InterCom.execute ALL SYnch.Connect OTHERS   ;workaround to avoid "Intercom resolve port name error"
+  IF (intercom.ping(localhost:10002))
+  (
+    intercom.wait localhost:10002
+    
+    IF ("&core2"=="0x4")
+    (
+      GOSUB EnableCM7_0    
+      intercom.execute localhost:10002 sys.cpu &cpu_device-M7-0
+    )  
+    ELSE IF ("&core2"=="0x5")
+    (
+      GOSUB EnableCM7_1    
+      intercom.execute localhost:10002 sys.cpu &cpu_device-M7-1 
+    )  
+    ELSE IF ("&core2"=="0x6")
+    (
+      GOSUB EnableCM7_2    
+      intercom.execute localhost:10002 sys.cpu &cpu_device-M7-2
+    )  
+    ELSE
+    (
+      GOSUB EnableCM7_0    
+      intercom.execute localhost:10002 sys.cpu &cpu_device-M7-0
+    )
+    
+    &core2="intercom.execute localhost:10002"
+
+    &core2 system.down
+    &core2 sys.Reset
+    &core2 System.Option ResBreak off
+    &core2 system.config debugporttype jtag
+    &core2 SYStem.Option DUALPORT ON
+    &core2 SYSTEM.JTAGclock 5mhz
+    &core2 trace.DISABLE
+    &core2 ETM.OFF
+    &core2 ITM.OFF
+    &core2 sys.Option DisMode THUMB
+    &core2 sys.attach
+    &core2 break
+	&core2 TrOnchip.Set MMERR OFF
+
+    &core2 data.load.elf &elf_file /GLOBTYPES /AnySym /NOCode
+  )
+  InterCom.execute ALL SYnch.Connect NONE
+)
+
+;   Enable MSCM Clock 
+&cofb_reg=Data.Long(SD:0x40088130)
+&cofb_reg=&cofb_reg|0x01000000
+D.S SD:0x40088130 %LE %LONG &cofb_reg   ;  MC_ME.MC_ME_PRTN1_COFB0_CLKEN
+D.S SD:0x40088304 %LE %LONG 0x00000001  ;  MC_ME.PRTN1_PUPD
+D.S SD:0x40088000 %LE %LONG 0x00005AF0  ;  MC_ME.MC_ME_CTL_KEY.R
+D.S SD:0x40088000 %LE %LONG 0x0000A50F  ;  MC_ME.MC_ME_CTL_KEY.R
+WAIT (Data.Long(SD:0x40088130)==&cofb_reg)  ; MC_ME.PRTN1_COFB0_STAT[REQ24]
+(
+    ; wait for MSCM clock to be active
+)
+
+; Release the core from the busy-wait loop from startup
+
+;=========================================================================
+; Log the chip version
+;=========================================================================
+;&path_to_siliconversion_logfile=""
+;&path_to_siliconversion_logdir=""
+;&siliconversion=""
+;
+;; Returns the name of the directory where the current PRACTICE program came from as a string.
+;&path_to_siliconversion_logdir=OS.PPD()
+;&path_to_siliconversion_logfile="&path_to_siliconversion_logdir"+"\"+"siliconversion.log"
+;
+;; Read SIUL2 MIDR1 register
+;&SIUL2_MIDR1_REG=Data.Long(eaxi:0x4009C004)
+;
+;; GetSIUL2 MIDR1 value
+;&SIUL2_MIDR1_Value=(&SIUL2_MIDR1_REG&0x000000FF)
+;&SIUL2_MIDR1_Major_Value=FORMAT.Decimal(1,((&SIUL2_MIDR1_REG&0x000000F0)>>4)+1) 
+;&SIUL2_MIDR1_Minor_Value=FORMAT.Decimal(1,(&SIUL2_MIDR1_REG&0x0000000F))
+;&siliconversion="&SIUL2_MIDR1_Major_Value"+"."+"&SIUL2_MIDR1_Minor_Value"
+;
+;IF sYmbol.EXIST(Hse_FwVersionExpected)
+;(
+;	&addr_fw_crypto_version=Hse_FwVersionExpected
+;	&fw_crypto_type=FORMAT.Decimal(1,(Data.Long(eaxi:(&addr_fw_crypto_version+2)))&0x0000FFFF)
+;	&fw_crypto_major=FORMAT.Decimal(1,(Data.Long(eaxi:(&addr_fw_crypto_version+4)))&0x000000FF)
+;	&fw_crypto_minor=FORMAT.Decimal(1,(Data.Long(eaxi:(&addr_fw_crypto_version+5)))&0x000000FF)
+;	&fw_crypto_package=FORMAT.Decimal(1,(Data.Long(eaxi:(&addr_fw_crypto_version+6)))&0x0000FFFF)
+;	&siliconversion="&siliconversion"+"_FW."+"&fw_crypto_type"+"."+"&fw_crypto_major"+"."+"&fw_crypto_minor"+"."+"&fw_crypto_package"
+;)
+;
+;; Open Trace Param Log to append the system params
+;OPEN  #5  &path_to_siliconversion_logfile /Create
+;WRITE #5  "&siliconversion"
+;CLOSE #5
+;=========================================================================
+;current core,master.
+Data.Load.Elf &elf_file /GLOBTYPES
+
+List.auto
+v.w g_TestResult g_TaskA_iter g_TaskB_iter OSTime OSCtxSwCtr
+Register.Set PC Reset_Handler
+TASK.CONFIG ~~/demo/arm/kernel/ucos-ii/ucos.t32    ; load uC/OS-II Awareness
+MENU.ReProgram ~~/demo/arm/kernel/ucos-ii/ucos.men ; load uC/OS-II menu
+
+go main
+ENDDO
+
+
+;r.s PC 0x34082c08  ;_start
+;sys.option DisMode THUMB
+;per ~~/pers32g2.per ,/Spotlight
+;per ~~/s32g247AdraftO.per ,/Spotlight
+
+GOSUB FXOSC_INIT
+GOSUB CORE_PLL
+GOSUB CORE_PLL_DFS1
+GOSUB PERIPH_PLL 	
+GOSUB PERIPH_DFS1_QSPI_66MHz
+GOSUB PERIPH_DFS1_QSPI_100MHz
+
+GOSUB QuadSPI_PinMux_CLKEnable
+GOSUB QuadSPI_Init
+GOSUB QuadSPI_ReadID
+GOSUB QuadSPI_Erase
+GOSUB QuadSPI_Read32Bytes
+GOSUB QuadSPI_Write32Bytes
+GOSUB QuadSPI_Read32Bytes
+
+GOSUB QuadSPI_InitDOPI_BypassMode_66MHz
+GOSUB QuadSPI_InitDOPI_DLL_AutoUpdateMode_100MHz
+GOSUB QuadSPI_EraseDOPI
+GOSUB QuadSPI_Read32BytesDOPI
+GOSUB QuadSPI_Write32BytesDOPI
+GOSUB QuadSPI_Read32BytesDOPI
+GOSUB QuadSPI_EraseDOPI
+
+GOSUB TestModeEntry
+
+EnableA53_0:
+(
+    IF !INTERCOM.PING(A53_0)
+        TargetSystem.NewInstance A53_0 /ARCHitecture ARM64
+    
+    InterCom A53_0 SYStem.CONFIG DEBUGPORTTYPE JTAG
+    InterCom A53_0 SYStem.CPU &cpu_device-A53
+    InterCom A53_0 SYStem.Option ResBreak off
+    InterCom A53_0 Trace.DISable
+    InterCom A53_0 ETM.OFF
+
+
+    Data.Set SD:0x4007C400 %Long 0x0700000F		; ncore disable
+    WAIT (Data.Long(AD:0x4007C400)&0x0700000F)==0x0700000F
+
+    ; Enable partition 1 clock
+
+    Data.Set SD:0x40088300 %Long 0x00000001     ; MC_ME.PRTN1_PCONF = 0x1, set PCE,
+    Data.Set SD:0x40088304 %Long 0x00000001     ; MC_ME.PRTN1_PUPD = 0x1
+    ; Mode change
+    Data.Set SD:0x40088000 %Long 0x00005AF0     ; MC_ME.CTL_KEY
+    Data.Set SD:0x40088000 %Long 0x0000A50F     ; MC_ME.CTL_KEY
+    ; Wait until clock is active (MC_ME_PRTN1_STAT[PCS] == 1)
+    WAIT (Data.Long(AD:0x40088308)&0x00000001)==0x00000001  ; MC_ME.PRTN1_STAT[PCS] == 1
+
+    ; Enable the XBAR interface
+
+    ; Unlocking the RDC register
+	; Writing the 3rd bit with 0 to enable XBAR interface
+    Data.Set SD:0x40080004 %Long 0x8000000F     ; RDC.RD1_CTRL_REG[RD1_CTRL_UNLOCK] = 1,
+    Data.Set SD:0x40080004 %Long 0x80000007     ;  RDC.RD1_CTRL_REG[RD1_INTERCONNECT_INTERFACE_DISABLE] = 0
+    ; Polling for XBAR interface to get enabled
+    WAIT (Data.Long(AD:0x40080084))==0x00000000 ; RDC.RD1_STAT_REG
+    ; wait 1.s
+
+    ; Releasing partition reset from MC_RGM for CA53 CORE0
+    Data.Set SD:0x40078048 %Long 0xFFFFFFFE ; partition 1: MC_RGM.PRST1_0[PERIPH_64_RST])
+    WAIT (Data.Long(AD:0x40078148)&0x00000001)==0x00000001  ; RGM.PSTAT1_0[PERIPH_64_STAT]
+
+    ; Disabling Output safe stating via OSSE bit
+    Data.Set SD:0x40088300 %Long 0x00000000 ; MC_ME.PRTN1_PCONF[OSSE] = 0
+    Data.Set SD:0x40088304 %Long 0x00000004 ; MC_ME.PRTN1_PUPD[OSSUD] = 1
+;    ; Mode change
+    Data.Set SD:0x40088000 %Long 0x00005AF0 ; MC_ME.CTL_KEY
+    Data.Set SD:0x40088000 %Long 0x0000A50F ; MC_ME.CTL_KEY
+;    ; Poll RGM for reset release and MC_ME for OSS status
+;    WAIT (Data.Long(AD:0x40078148)&0x0000000E)==0x0000000E  ; RGM.PSTAT1_0[PERIPH_64_STAT]
+    WAIT (Data.Long(AD:0x40088308)&0x00000001)==0x00000001  ; MC_ME.PRTN1_STAT[OSSS] == 0
+
+    ; Core enable CA53_0
+    Data.Set SD:0x4008834C %Long 0x34020000 ; MC_ME.PRTN1_CORE0_ADDR
+    Data.Set SD:0x40088340 %Long 0x00000001 ; MC_ME.PRTN1_CORE0_PCONF[CCE] = 1
+    Data.Set SD:0x40088344 %Long 0x00000001 ; MC_ME.PRTN1_CORE0_PUPD[CCUPD] = 1
+    ; Mode change
+    Data.Set SD:0x40088000 %Long 0x00005AF0
+    Data.Set SD:0x40088000 %Long 0x0000A50F
+    ; Poll Core 0 clock process status
+    WAIT (Data.Long(AD:0x40088348)&0x00000001)==0x00000001 ; MC_ME.PRTN1_CORE0_STAT[CCS] == 1
+
+    ; Releasing partition reset from MC_RGM for CA53 CORE0
+    Data.Set SD:0x40078048 %Long 0xFFFFFFFC ; partition 1: MC_RGM.PRST1_0[PERIPH_64_RST])
+    WAIT (Data.Long(AD:0x40078148)&0x00000003)==0x00000000  ; RGM.PSTAT1_0[PERIPH_64_STAT]
+
+    ;Core enable CA53_1
+;    Data.Set SD:0x4008836C %Long 0x34414600
+;    Data.Set SD:0x40088360 %Long 0x00000001
+;    Data.Set SD:0x40088364 %Long 0x00000001
+;    Data.Set SD:0x40088000 %Long 0x00005AF0
+;    Data.Set SD:0x40088000 %Long 0x0000A50F
+
+    ;Core enable CA53_2
+;    Data.Set SD:0x4008838C %Long 0x34414600
+;    Data.Set SD:0x40088380 %Long 0x00000001
+;    Data.Set SD:0x40088384 %Long 0x00000001
+;    Data.Set SD:0x40088000 %Long 0x00005AF0
+;    Data.Set SD:0x40088000 %Long 0x0000A50F
+;    WAIT (Data.Long(AD:0x40088388)&0x00000001)==0x00000001
+
+    ;Core enable CA53_3
+;    Data.Set SD:0x400883AC %Long 0x34414600
+;    Data.Set SD:0x400883A0 %Long 0x00000001
+;    Data.Set SD:0x400883A4 %Long 0x00000001
+;    Data.Set SD:0x40088000 %Long 0x00005AF0
+;    Data.Set SD:0x40088000 %Long 0x0000A50F
+
+    InterCom A53_0 Core.assign 1
+    InterCom A53_0 SYStem.Mode Attach
+    Intercom A53_0 break
+
+    RETURN
+)
+
+
+EnableCM7_0:
+(
+    ; Partition 0 - enable peripherals. Optional, none used by MCAL.
+    ;Data.Set eaxi:0x40088100 %Long 0x00000001    ; MC_ME.PRTN0_PCONF.R = 1, PCE=1, Enable the clock to IPs
+    ;Data.Set eaxi:0x40088104 %Long 0x00000001    ; MC_ME.PRTN0_PUPD.R = 1, PCUD=1, Trigger the hardware process for enabling/disabling the clock to IPs (other than core(s)) 
+    ;Data.Set eaxi:0x40088130 %Long 0x00000003    ; MC_ME.PRTN0_COFB0_CLKEN.R = 0x3
+    ;Data.Set eaxi:0x40088000 %Long 0x00005AF0    ; MC_ME.MC_ME_CTL_KEY.R
+    ;Data.Set eaxi:0x40088000 %Long 0x0000A50F    ; MC_ME.MC_ME_CTL_KEY.R
+    ;; wait for clock to be active
+    ;WAIT (Data.Long(eaxi:0x40088108)&0x00000001)==0x00000001      ; MC_ME.PRTN0_STAT.R
+    ;WAIT (Data.Long(eaxi:0x40088110)&0x00000003)==0x00000003      ; MC_ME.PRTN0_COFB0_STAT.R
+
+    ; Partition 0 - enable core.
+    ;Data.Set eaxi:0x40088004 %Long 0x00000001    ; MC_ME.MODE_CONF.R = 1, DEST_RST=1
+    Data.Set eaxi:0x4008814C %Long VTABLE        ; MC_ME.PRTN0_CORE0_ADDR.R = x
+    Data.Set eaxi:0x40088140 %Long 0x00000001    ; MC_ME.PRTN0_CORE0_PCONF.R = 1, CCE=1, Enable the core clock
+    Data.Set eaxi:0x40088144 %Long 0x00000001    ; MC_ME.PRTN0_CORE0_PUPD.R = 1, CCUPD=1, Trigger the hardware process for enabling core clock to Core 0
+    Data.Set eaxi:0x40088000 %Long 0x00005AF0    ; MC_ME.MC_ME_CTL_KEY.R
+    Data.Set eaxi:0x40088000 %Long 0x0000A50F    ; MC_ME.MC_ME_CTL_KEY.R
+    ; wait for clock to be active
+    WAIT (Data.Long(eaxi:0x40088148)&0x00000001)==0x00000001      ; MC_ME.PRTN0_CORE0_STAT.R, CCS=1, Core 0 clock is active
+     
+    ; CM7 Cluster 0 RGM_PRST0_0[PERIPH0_RST]
+    ; CM7 Cluster 1 RGM_PRST0_0[PERIPH1_RST]  
+    ; CM7 Cluster 2 RGM_PRST0_0[PERIPH2_RST]
+    ; CA53 core 0 – Cluster 0 RGM_PRST1_0[PERIPH1_RST]
+    ; CA53 core 1 - Cluster 0 RGM_PRST1_0[PERIPH2_RST]
+    ; CA53 core 2 – Cluster 1 RGM_PRST1_0[PERIPH3_RST]
+    ; CA53 core 3 – Cluster 1 RGM_PRST1_0[PERIPH4_RST]
+    ; LLCE                    RGM_PRST3_0[PERIPH0_RST]
+
+    ;Release the core reset via the corresponding MC_RGM_PRST register
+    Data.Set eaxi:0x40078040 %Long 0xFFFFFFFE    ; MC_RGM.PRST0_0.R, PERIPH_0_RST=0, release CM7_0 from reset.
+
+    ;Wait for reset and output safe stating status bits
+    WAIT (Data.Long(eaxi:0x40078140)&0x00000001)==0x00000000      ; MC_RGM.PSTAT0_0; 0b - Peripheral PERIPH_28_STAT is not in reset
+   
+    RETURN
+)
+
+
+EnableCM7_1:
+(
+    ; Partition 0 - enable peripherals. Optional, none used by MCAL.
+    ;Data.Set eaxi:0x40088100 %Long 0x00000001    ; MC_ME.PRTN0_PCONF.R = 1, PCE=1, Enable the clock to IPs
+    ;Data.Set eaxi:0x40088104 %Long 0x00000001    ; MC_ME.PRTN0_PUPD.R = 1, PCUD=1, Trigger the hardware process for enabling/disabling the clock to IPs (other than core(s))
+    ;Data.Set eaxi:0x40088130 %Long 0x00000003    ; MC_ME.PRTN0_COFB0_CLKEN.R = 0x3
+    ;Data.Set eaxi:0x40088000 %Long 0x00005AF0    ; MC_ME.MC_ME_CTL_KEY.R
+    ;Data.Set eaxi:0x40088000 %Long 0x0000A50F    ; MC_ME.MC_ME_CTL_KEY.R
+    ;; wait for clock to be active
+    ;WAIT (Data.Long(eaxi:0x40088108)&0x00000001)==0x00000001      ; MC_ME.PRTN0_STAT.R
+    ;WAIT (Data.Long(eaxi:0x40088110)&0x00000003)==0x00000003      ; MC_ME.PRTN0_COFB0_STAT.R
+
+    ; Partition 0 - enable core.
+    ;Data.Set eaxi:0x40088004 %Long 0x00000001    ; MC_ME.MODE_CONF.R = 1, DEST_RST=1
+    Data.Set eaxi:0x4008816C %Long VTABLE        ; MC_ME.PRTN0_CORE1_ADDR.R = x
+    Data.Set eaxi:0x40088160 %Long 0x00000001    ; MC_ME.PRTN0_CORE1_PCONF.R = 1, CCE=1, Enable the core clock
+    Data.Set eaxi:0x40088164 %Long 0x00000001    ; MC_ME.PRTN0_CORE1_PUPD.R = 1, CCUPD=1, Trigger the hardware process for enabling core clock to Core 0
+    Data.Set eaxi:0x40088000 %Long 0x00005AF0    ; MC_ME.MC_ME_CTL_KEY.R
+    Data.Set eaxi:0x40088000 %Long 0x0000A50F    ; MC_ME.MC_ME_CTL_KEY.R
+    ; wait for clock to be active
+    WAIT (Data.Long(eaxi:0x40088168)&0x00000001)==0x00000001      ; MC_ME.PRTN0_CORE0_STAT.R, CCS=1, Core 1 clock is active
+
+    ; CM7 Cluster 0 RGM_PRST0_0[PERIPH0_RST]
+    ; CM7 Cluster 1 RGM_PRST0_0[PERIPH1_RST]
+    ; CM7 Cluster 2 RGM_PRST0_0[PERIPH2_RST]
+    ; CA53 core 0 – Cluster 0 RGM_PRST1_0[PERIPH1_RST]
+    ; CA53 core 1 - Cluster 0 RGM_PRST1_0[PERIPH2_RST]
+    ; CA53 core 2 – Cluster 1 RGM_PRST1_0[PERIPH3_RST]
+    ; CA53 core 3 – Cluster 1 RGM_PRST1_0[PERIPH4_RST]
+    ; LLCE                    RGM_PRST3_0[PERIPH0_RST]
+
+    ;Release the core reset via the corresponding MC_RGM_PRST register
+    Data.Set eaxi:0x40078040 %Long 0xFFFFFFFC    ; MC_RGM.PRST0_0.R, PERIPH_2_RST=0, release CM7_1 from reset.
+
+    ;Wait for reset and output safe stating status bits
+    WAIT (Data.Long(eaxi:0x40078140)&0x00000001)==0x00000000      ; MC_RGM.PSTAT0_0; 0b - Peripheral PERIPH_28_STAT is not in reset
+
+    RETURN
+)
+
+
+EnableCM7_2:
+(
+    ; Partition 0 - enable peripherals. Optional, none used by MCAL.
+    ;Data.Set eaxi:0x40088100 %Long 0x00000001    ; MC_ME.PRTN0_PCONF.R = 1, PCE=1, Enable the clock to IPs
+    ;Data.Set eaxi:0x40088104 %Long 0x00000001    ; MC_ME.PRTN0_PUPD.R = 1, PCUD=1, Trigger the hardware process for enabling/disabling the clock to IPs (other than core(s))
+    ;Data.Set eaxi:0x40088130 %Long 0x00000003    ; MC_ME.PRTN0_COFB0_CLKEN.R = 0x3
+    ;Data.Set eaxi:0x40088000 %Long 0x00005AF0    ; MC_ME.MC_ME_CTL_KEY.R
+    ;Data.Set eaxi:0x40088000 %Long 0x0000A50F    ; MC_ME.MC_ME_CTL_KEY.R
+    ;; wait for clock to be active
+    ;WAIT (Data.Long(eaxi:0x40088108)&0x00000001)==0x00000001      ; MC_ME.PRTN0_STAT.R
+    ;WAIT (Data.Long(eaxi:0x40088110)&0x00000003)==0x00000003      ; MC_ME.PRTN0_COFB0_STAT.R
+
+    ; Partition 0 - enable core.
+    ;Data.Set eaxi:0x40088004 %Long 0x00000001    ; MC_ME.MODE_CONF.R = 1, DEST_RST=1
+    Data.Set eaxi:0x4008818C %Long VTABLE        ; MC_ME.PRTN0_CORE1_ADDR.R = x
+    Data.Set eaxi:0x40088180 %Long 0x00000001    ; MC_ME.PRTN0_CORE2_PCONF.R = 1, CCE=1, Enable the core clock
+    Data.Set eaxi:0x40088184 %Long 0x00000001    ; MC_ME.PRTN0_CORE2_PUPD.R = 1, CCUPD=1, Trigger the hardware process for enabling core clock to Core 0
+    Data.Set eaxi:0x40088000 %Long 0x00005AF0    ; MC_ME.MC_ME_CTL_KEY.R
+    Data.Set eaxi:0x40088000 %Long 0x0000A50F    ; MC_ME.MC_ME_CTL_KEY.R
+    ; wait for clock to be active
+    WAIT (Data.Long(eaxi:0x40088188)&0x00000001)==0x00000001      ; MC_ME.PRTN0_CORE0_STAT.R, CCS=1, Core 2 clock is active
+
+    ; CM7 Cluster 0 RGM_PRST0_0[PERIPH0_RST]
+    ; CM7 Cluster 1 RGM_PRST0_0[PERIPH1_RST]
+    ; CM7 Cluster 2 RGM_PRST0_0[PERIPH2_RST]
+    ; CA53 core 0 – Cluster 0 RGM_PRST1_0[PERIPH1_RST]
+    ; CA53 core 1 - Cluster 0 RGM_PRST1_0[PERIPH2_RST]
+    ; CA53 core 2 – Cluster 1 RGM_PRST1_0[PERIPH3_RST]
+    ; CA53 core 3 – Cluster 1 RGM_PRST1_0[PERIPH4_RST]
+    ; LLCE                    RGM_PRST3_0[PERIPH0_RST]
+
+    ;Release the core reset via the corresponding MC_RGM_PRST register
+    Data.Set eaxi:0x40078040 %Long 0xFFFFFFF8    ; MC_RGM.PRST0_0.R, PERIPH_1_RST=2, release CM7_2 from reset.
+
+    ;Wait for reset and output safe stating status bits
+    WAIT (Data.Long(eaxi:0x40078140)&0x00000001)==0x00000000      ; MC_RGM.PSTAT0_0; 0b - Peripheral PERIPH_28_STAT is not in reset
+
+    RETURN
+)
+InitSramEccViaRAMCtrl:
+(
+    ;Initialize the RAM using OCPSRAMC[PRAMCR:INITREQ] controller.  ;SRAMC_0
+  PER.Set.simple eaxi:0x4019C00C %Long 0xFFFFFFFF ; clear all the errors, PRAMSR
+  PER.Set.simple eaxi:0x4019C004 %Long 0x00000000  ; range 0x34000000--0x343FFFFF
+  PER.Set.simple eaxi:0x4019C008 %Long 0x1FFFF  ; range 0x34000000--0x347FFFFF
+  PER.Set.simple eaxi:0x4019C000 %Long 0x00000001
+  WHILE ((data.long(eaxi:0x4019C00C)&0x00000001)==0x00000000)      
+  (
+    ; wait for DMA DONE bit to be set
+  )
+  PER.Set.simple eaxi:0x4019C000 %Long 0x00000000
+  
+    ;Initialize the RAM using OCPSRAMC[PRAMCR:INITREQ] controller.  ;SRAMC_1
+  PER.Set.simple eaxi:0x401A000C %Long 0xFFFFFFFF ; clear all the errors, PRAMSR
+  PER.Set.simple eaxi:0x401A0004 %Long 0x00000000  ; range 0x34000000--0x343FFFFF
+  PER.Set.simple eaxi:0x401A0008 %Long 0x1FFFF  ; range 0x34000000--0x347FFFFF
+  PER.Set.simple eaxi:0x401A0000 %Long 0x00000001
+  WHILE ((data.long(eaxi:0x401A000C)&0x00000001)==0x00000000)      
+  (
+    ; wait for DMA DONE bit to be set
+  )
+  PER.Set.simple eaxi:0x401A0000 %Long 0x00000000
+  RETURN
+)
+
+DisableHSEWatchdog:
+(
+  ; disable the Watchdog
+  PRIVATE &index
+  
+  ; Sequence from S32K2
+  Data.Set SD:0x23230010 %Long 0x0000C520
+  Data.Set SD:0x23230010 %Long 0x0000D928
+  Data.Set SD:0x23230000 %Long 0xFF000000
+  	
+  RETURN
+)
+
+DisableSWTWatchdog:
+(
+  ; disable the Watchdog
+  PRIVATE &index
+  	
+  ; Disable SWT0..3
+  &index=0
+  WHILE &index<4.
+  (
+    Data.Set eaxi:0x40100010+(&index*0x4000) %Long 0x0000C520
+    Data.Set eaxi:0x40100010+(&index*0x4000) %Long 0x0000D928
+    Data.Set eaxi:0x40100000+(&index*0x4000) %Long 0xFF000000
+    &index=&index+1
+  )
+  
+;  ; Disable SWT4..7
+;  &index=0
+;  WHILE &index<4.
+;  (
+;    Data.Set eaxi:0x40200010+(&index*0x4000) %Long 0x0000C520
+;    Data.Set eaxi:0x40200010+(&index*0x4000) %Long 0x0000D928
+;    Data.Set eaxi:0x40200000+(&index*0x4000) %Long 0xFF000000
+;    &index=&index+1
+;  )
+  	
+  RETURN
+)
+
+;==========================================================================
+; SetupLINBaudClock - Configure PERIPH_PLL PHI3 = 125 MHz and route to
+;   MC_CGM_0 MUX_8 so LIN_BAUD_CLK = 125 MHz (matches metha/U-Boot).
+;   This is required for 115200 baud with LINIBRR=67/LINFBRR=13.
+;==========================================================================
+SetupLINBaudClock:
+(
+    ; 1) Enable FXOSC if not already running (bootrom usually starts it)
+    IF (Data.Long(eaxi:0x40050004)&0x80000000)==0x00000000
+    (
+        Data.Set eaxi:0x40050000 %LE %Long 0x018000C0  ; FXOSC_CTRL - prep
+        Data.Set eaxi:0x40050000 %LE %Long 0x018000C1  ; FXOSC_CTRL - enable
+        WAIT (Data.Long(eaxi:0x40050004)&0x80000000)==0x80000000  ; FXOSC stable
+    )
+
+    ; 2) If PERIPH_PLL not locked, configure and start it
+    IF (Data.Long(eaxi:0x4003C004)&0x00000004)==0x00000000
+    (
+        ; PLL not running - full init
+        Data.Set eaxi:0x4003C000 %Long 0x80000000     ; PLLCR - disable PLL
+        Data.Set eaxi:0x4003C020 %Long 0x00000001     ; PLLCLKMUX - select FXOSC
+        Data.Set eaxi:0x4003C008 %Long 0x00001032     ; PLLDV: RDIV=1, MFI=50 -> VCO=2000MHz
+        Data.Set eaxi:0x4003C010 %Long 0x00000000     ; PLLFD: integer mode (MFN=0)
+        Data.Set eaxi:0x4003C08C %Long 0x00000000     ; PLLODIV3: disable during PLL startup
+        Data.Set eaxi:0x4003C000 %Long 0x00000000     ; PLLCR - enable PLL
+        WAIT (Data.Long(eaxi:0x4003C004)&0x00000004)==0x00000004  ; PLL locked
+    )
+
+    ; Enable PHI3 output divider AFTER PLL is locked
+    ; DIV=15 means divide-by-16: VCO 2000MHz / 16 = 125 MHz
+    Data.Set eaxi:0x4003C08C %Long 0x800F0000     ; PLLODIV3: DE=1, DIV=15 -> PHI3=125MHz
+
+    ; 3) Switch MC_CGM_0 MUX_8 to PERIPH_PLL_PHI3 (SELCTL=21)
+    ;    MUX_8 has no divider (no DC_0 register) - just CSC + CSS
+    Data.Set eaxi:0x40030500 %Long 0x15000004     ; MUX_8_CSC: SELCTL=21(PHI3), CLK_SW=1
+    WAIT (Data.Long(eaxi:0x40030504)&0x15020000)==0x15020000  ; CSS: SELSTAT=21, CLK_SW done
+
+    RETURN
+)
+
+Data.Load.Elf &elf_file /GLOBTYPES
+
+
+FXOSC_INIT:
+    PER.Set.simple ASD:0x40050000 %Long 0x018000C0  ;FXOSC_CTRL
+    PER.Set.simple ASD:0x40050000 %Long 0x018000C1  ;FXOSC_CTRL
+    WAIT (Data.Long(AD:0x40050004)&0x80000000)==0x80000000
+RETURN
+
+CORE_PLL:
+    Data.Set 0x40038080 %Long 0x00000000 ; DIV0 disabled
+    Data.Set 0x40038084 %Long 0x00000000 ; DIV1 disable
+    Data.Set 0x40038000 %Long 0x80000000 ; disable PLL
+    Data.Set 0x40038020 %Long 0x00000001 ; Select FXOSC of 40MHz as source
+    Data.Set 0x40038008 %Long 0x0C3F1032 ; PLLDV - ref = 40MHz FXOSC, RDIV = 1, MFI = 32 VCO = 2000 MHz
+    Data.Set 0x40038010 %Long 0x00000000 ; PLLFD - SDMEN = 0, MFN = 0 integer mode
+    Data.Set 0x4003800C %Long 0x40000000 ; PLLFM -  SSCGBYP = 1 spread spectrum modulation bypassed
+    WAIT 100.ms ; Wait for the PLL reference clock to be stable
+    Data.Set 0x40038000 %Long 0x00000000 ; enable PLL
+    WAIT (Data.Long(AD:0x40038004)&0x00000004)==0x00000004
+RETURN
+
+
+CORE_PLL_DFS1:
+    Data.Set 0x40054014 %Long 0x0000003F ; DFS outputs are in reset
+    WAIT 100.ms ; Wait for the DFS port to become 0
+    &temp=Data.Long(A:0x4005400C) ;Read status to make sure that DFSs are reset Expected output = 0x00000000
+    Data.Set 0x40054018 %Long 0x00000002 ; DFS module is disabled
+    Data.Set 0x4005401C %Long 0x00000200 ; for DFS1 DVPORT0 = 2 i.e. CORE_DFS1_CLK=800 MHz
+    Data.Set 0x40054018 %Long 0x00000000 ; DFS module is enabled
+    Data.Set 0x40054014 %Long 0x0000003E ; DFS1 output is enabled    
+    WAIT (Data.Long(AD:0x4005400C)&0x00000001)==0x00000001
+
+    ;Switch clock from FIRC to PLL(CORE_DFS1_CLK) in MC_CGM for XBAR_CLK
+    Data.Set SD:40030308 %LE %Long 0x00000000 ; Divider disabled
+    Data.Set SD:40030300 %LE %Long 0x0C000004 ; Switch clock to CORE_DFS1_CLK
+    WAIT (Data.Long(AD:0x40030304)&0x0C020004)==0x0C020004
+
+RETURN
+
+
+PERIPH_PLL:
+    Data.Set 0x4003C080 %Long 0x00000000 ; DIV0 disabled
+    Data.Set 0x4003C084 %Long 0x00000000 ; DIV1 disable
+    Data.Set 0x4003C088 %Long 0x00000000 ; DIV2 disabled
+    Data.Set 0x4003C08C %Long 0x00000000 ; DIV3 disable
+    Data.Set 0x4003C090 %Long 0x00000000 ; DIV4 disabled
+    Data.Set 0x4003C094 %Long 0x00000000 ; DIV5 disable
+    Data.Set 0x4003C098 %Long 0x00000000 ; DIV6 disabled
+    Data.Set 0x4003C09C %Long 0x00000000 ; DIV7 disable
+    Data.Set 0x4003C000 %Long 0x80000000 ; disable PLL
+    Data.Set 0x4003C020 %Long 0x00000001 ; Select FXOSC of 40MHz as source
+    Data.Set 0x4003C008 %Long 0x0C3F1032 ; PLLDV - ref = 40MHz FXOSC, RDIV = 1, MFI = 32 VCO = 2000 MHz
+    Data.Set 0x4003C010 %Long 0x00000000 ; PLLFD - SDMEN = 0, MFN = 0 integer mode
+    WAIT 100.ms ; Wait for the PLL reference clock to be stable
+    Data.Set 0x4003C000 %Long 0x00000000 ; enable PLL
+    WAIT (Data.Long(AD:0x4003C004)&0x00000004)==0x00000004
+RETURN
+
+PERIPH_DFS1_QSPI_100MHz:
+    Data.Set 0x40058014 %Long 0x0000003F ; DFS outputs are in reset
+    WAIT 100.ms ; Wait for the DFS port to become 0
+    &temp=Data.Long(A:0x4005800C) ;Read status to make sure that DFSs are reset Expected output = 0x00000000
+    Data.Set 0x40058018 %Long 0x00000002 ; DFS module is disabled
+    
+    Data.Set 0x4005801C %Long 0x00000500 ; for DFS1 DVPORT0 = 5 i.e. PERIPH_DFS1_CLK=200 MHz
+    ;Data.Set 0x40058020 %Long 0x00000500 ; for DFS1 DVPORT1 = 5 i.e. PERIPH_DFS2_CLK=200 MHz
+    ;Data.Set 0x40058024 %Long 0x00000500 ; for DFS1 DVPORT2 = 5 i.e. PERIPH_DFS3_CLK=200 MHz
+    ;Data.Set 0x40058028 %Long 0x00000500 ; for DFS1 DVPORT3 = 5 i.e. PERIPH_DFS4_CLK=200 MHz
+    ;Data.Set 0x4005802C %Long 0x00000500 ; for DFS1 DVPORT4 = 5 i.e. PERIPH_DFS5_CLK=200 MHz
+    ;Data.Set 0x40058030 %Long 0x00000500 ; for DFS1 DVPORT5 = 5 i.e. PERIPH_DFS6_CLK=200 MHz
+    
+    Data.Set 0x40058018 %Long 0x00000000 ; DFS module is enabled
+    Data.Set 0x40058014 %Long 0x0000003E ; DFS1 output is enabled
+    ;WAIT 100.ms ; Wait for the DFS port to become 0    
+    WAIT (Data.Long(AD:0x4005800C)&0x00000001)==0x00000001
+
+    ;Switch clock from FIRC to PLL(PERIPH_DFS1_CLK) in MC_CGM for QSPI_1X_CLK
+    ;clk enable for the QuadSPI
+    Data.Set SD:40030608 %LE %Long  0x00000000  ;MC_CGM_0_AC12_DC_0 Divider disabled
+    Data.Set SD:40030600 %LE %Long  0x1A000004  ;MC_CGM_0_AC12_CSC switch to PERIPH_DFS1_CLK=200MHz)
+    ;Data.Set SD:40030608 %LE %Long  0x80010000  ;MC_CGM_0_AC12_DC_0 divide by 2 (i.e. for PLL QSPI_2X_CLK = 100MHz, QSPI_1X_CLK = 50MHz) */
+    Data.Set SD:40030608 %LE %Long  0x80000000  ;MC_CGM_0_AC12_DC_0 divide by 1 (i.e. for PLL QSPI_2X_CLK = 200MHz, QSPI_1X_CLK = 100MHz) */
+    WAIT (Data.Long(AD:0x40030604)&0x1A020000)==0x1A020000
+   
+RETURN
+
+PERIPH_DFS1_QSPI_66MHz:
+    Data.Set 0x40058014 %Long 0x0000003F ; DFS outputs are in reset
+    WAIT 100.ms ; Wait for the DFS port to become 0
+    &temp=Data.Long(A:0x4005800C) ;Read status to make sure that DFSs are reset Expected output = 0x00000000
+    Data.Set 0x40058018 %Long 0x00000002 ; DFS module is disabled
+    
+    Data.Set 0x4005801C %Long 0x00000212 ; for DFS1 DVPORT0 = MFI=2,MFN=18 i.e. PERIPH_DFS1_CLK=400 MHz
+    ;Data.Set 0x40058020 %Long 0x00000500 ; for DFS1 DVPORT1 = 5 i.e. PERIPH_DFS2_CLK=200 MHz
+    ;Data.Set 0x40058024 %Long 0x00000500 ; for DFS1 DVPORT2 = 5 i.e. PERIPH_DFS3_CLK=200 MHz
+    ;Data.Set 0x40058028 %Long 0x00000500 ; for DFS1 DVPORT3 = 5 i.e. PERIPH_DFS4_CLK=200 MHz
+    ;Data.Set 0x4005802C %Long 0x00000500 ; for DFS1 DVPORT4 = 5 i.e. PERIPH_DFS5_CLK=200 MHz
+    ;Data.Set 0x40058030 %Long 0x00000500 ; for DFS1 DVPORT5 = 5 i.e. PERIPH_DFS6_CLK=200 MHz
+    
+    Data.Set 0x40058018 %Long 0x00000000 ; DFS module is enabled
+    Data.Set 0x40058014 %Long 0x0000003E ; DFS1 output is enabled
+    ;WAIT 100.ms ; Wait for the DFS port to become 0    
+    WAIT (Data.Long(AD:0x4005800C)&0x00000001)==0x00000001
+
+    ;Switch clock from FIRC to PLL(PERIPH_DFS1_CLK) in MC_CGM for QSPI_1X_CLK
+    ;clk enable for the QuadSPI
+    Data.Set SD:40030608 %LE %Long  0x00000000  ;MC_CGM_0_AC12_DC_0 Divider disabled
+    Data.Set SD:40030600 %LE %Long  0x1A000004  ;MC_CGM_0_AC12_CSC switch to PERIPH_DFS1_CLK=200MHz)
+    Data.Set SD:40030608 %LE %Long  0x80020000  ;MC_CGM_0_AC12_DC_0 divide by 3 (i.e. for PLL QSPI_2X_CLK = 133MHz, QSPI_1X_CLK = 66MHz) */
+    WAIT (Data.Long(AD:0x40030604)&0x1A020000)==0x1A020000
+   
+RETURN
+
+
+QuadSPI_PinMux_CLKEnable:
+    
+    ;QuadSPI A
+    Data.Set A:0x4009C394 %Long 0x00282021  ; PF_05(85),QuadSPI A DATA 0 ; FLASH_DAT0
+    Data.Set A:0x4009CAB0 %Long 0x2  ; Input Mux PF_05(540)   ,QuadSPI A DATA 0 ; FLASH_DAT0
+
+    Data.Set A:0x4009C398 %Long 0x00282021  ; PF_06(86)   ,QuadSPI A DATA 1 ; FLASH_DAT1
+    Data.Set A:0x4009CAB4 %Long 0x2  ; Input Mux PF_06(541)   ,QuadSPI A DATA 1 ; FLASH_DAT1
+
+    Data.Set A:0x4009C39C %Long 0x00282021  ; PF_07(87)  ,QuadSPI A DATA 2 ; FLASH_DAT2
+    Data.Set A:0x4009CAB8 %Long 0x2  ; Input Mux PF_07(542)  ,QuadSPI A DATA 2 ; FLASH_DAT2
+
+    Data.Set A:0x4009C3A0 %Long 0x00282021  ; PF_08(88)  ,QuadSPI A DATA 3 ; FLASH_DAT3
+    Data.Set A:0x4009CABC %Long 0x2  ; Input Mux PF_8(543)  ,QuadSPI A DATA 3 ; FLASH_DAT3
+
+    Data.Set A:0x4009C3A4 %Long 0x00282021  ; PF_09(89) ,QuadSPI A DATA 4; FLASH_DATA4
+    Data.Set A:0x4009CAC0 %Long 0x2  ; PF_09(544) ,QuadSPI A DATA 4 ; FLASH_DATA4
+
+    Data.Set A:0x4009C3A8 %Long 0x00282021  ; PF_10(90)  ,QuadSPI A DATA 5 ; FLASH_DATA5
+    Data.Set A:0x4009CAC4 %Long 0x2  ; PF10(545)  ,QuadSPI A DATA 5 ; FLASH_DATA5
+
+    Data.Set A:0x4009C3AC %Long 0x00282021  ; PF_11(91)  ,QuadSPI A DATA 6 ; FLASH_DATA6
+    Data.Set A:0x4009CAC8 %Long 0x2  ; PF_11(546)  ,QuadSPI A DATA 6 ; FLASH_DATA6
+
+    Data.Set A:0x4009C3B0 %Long 0x00282021  ; PF_12(92)  ,QuadSPI A DATA 7 ; FLASH_DATA7
+    Data.Set A:0x4009CACC %Long 0x2  ; PF_12(547)  ,QuadSPI A DATA 7 ; FLASH_DATA7
+
+    Data.Set A:0x4009C3B4 %Long 0x00282021  ; PF_13(93)  ,QuadSPI A Data Strobe Input ; FLASH_DATA_STROBE
+    Data.Set A:0x4009CAD0 %Long 0x2  ; PF_13(548)  ,QuadSPI A Data Strobe Input ; FLASH_DATA_STROBE
+
+    Data.Set A:0x4009C3B8 %Long 0x00083020 	; PF_14(94) , QuadSPI A Interrupt
+    Data.Set A:0x4009CAD4 %Long 0x2 	; PF_14(549) , QuadSPI A Interrupt
+
+    Data.Set A:0x4009C3C0 %Long 0x00202021  ; PG_0(96)   ,QuadSPI A CLK + Output ; FLASH_CLK
+    Data.Set A:0x4009C3C4 %Long 0x00202021  ; PG_1(97)   ,QuadSPI A CLK - Output ; FLASH_CLK
+
+    Data.Set A:0x4009C3C8 %Long 0x00202021  ; PG_2(98)   ,QuadSPI A CLK_2 + Output ; FLASH_CLK
+    Data.Set A:0x4009C3CC %Long 0x00202021  ; PG_3(99)   ,QuadSPI A CLK_2 - Output ; FLASH_CLK
+
+    Data.Set A:0x4009C3D0 %Long 0x00203021  ; PG_04(100)   ,QuadSPI A Chip Select 0 Output, ; FLASH_CS0
+    Data.Set A:0x4009C3D4 %Long 0x00203021  ; PG_05(101)   ,QuadSPI A Chip Select 1 Output, ; FLASH_CS1
+
+    ;QuadSPI B is not present
+
+RETURN
+
+QuadSPI_Init:
+
+    ;Internal DQS pad loopback, SPI x1 mode, AHB and IP modes configured.
+
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x000F404C        ; QuadSPI0->MCR =  QuadSPI_MCR_MDIS_MASK; disable module
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x020F404C        ; QuadSPI0->MCR =  Select Internal DQS pad loopback
+
+    Data.Set A:&QSPI_Cntl_BASE+0x0C %LE %Long 0x0303            ; QuadSPI0->FLSHCR = QuadSPI_FLSHCR_TCSH(3) | QuadSPI_FLSHCR_TCSS(3); Flash specific
+
+    Data.Set A:&QSPI_Cntl_BASE+0x10 %LE %Long 0x0000040B        ; QuadSPI0->BUF0CR = 32 bytes prefetch size, HSE master ID
+    Data.Set A:&QSPI_Cntl_BASE+0x30 %LE %Long 0x00000400        ; QuadSPI0->BUF0IND = 1024 bytes buffer size
+
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x41200507        ; QuadSPI0->DLLCRA; DDLEN=0,FREQEN=1,REFCNTR=1,DLLRES=2,SLV_FINE_OFFSET=0,SLV_DLY_OFFSET=0,SLV_DLY_COARSE=5,SLV_DLY_FINE=0,SLAVE_AUTO_UPDT=0,SLV_EN=1,SLV_DLL_BYPASS=1,SLV_UPD=1.
+
+    Data.Set A:&QSPI_Cntl_BASE+0x104 %LE %Long 0x00000000       ; QuadSPI0->SFACR; PPWB  = 0
+    Data.Set A:&QSPI_Cntl_BASE+0x108 %LE %Long 0x44000000       ; QuadSPI0->SMPR; DLLFSMPFA = 4, DLLFSMPFB = 4.
+    Data.Set A:&QSPI_Cntl_BASE+0x110 %LE %Long 0x00000100       ; QuadSPI0->RBCT; RXBRD = 1, AHB read mode.
+
+    Data.Set A:&QSPI_Cntl_BASE+0x180 %LE %Long 0x01000000       ; QuadSPI0->SFA1AD; set top address to 16MB
+    Data.Set A:&QSPI_Cntl_BASE+0x184 %LE %Long 0x01000000       ; QuadSPI0->SFA2AD; set top address to 0MB
+    Data.Set A:&QSPI_Cntl_BASE+0x188 %LE %Long 0x01000000       ; QuadSPI0->SFB1AD; set top address to 0MB
+    Data.Set A:&QSPI_Cntl_BASE+0x18C %LE %Long 0x01000000       ; QuadSPI0->SFB2AD; set top address to 0MB
+
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x020F004C        ; QuadSPI0->MCR =  QuadSPI_MCR_MDIS_MASK; enable module
+
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ;Program LUT0 with READ_STATUS_REGISTER
+    Data.Set A:&QSPI_Cntl_BASE+0x310 %LE %Long 0x1C010405   ;  SEQID 0
+    Data.Set A:&QSPI_Cntl_BASE+0x314 %LE %Long 0x0
+
+    ;Program LUT5 with READ
+    Data.Set A:&QSPI_Cntl_BASE+0x324 %LE %Long 0x08180403   ;   SEQID 1
+    Data.Set A:&QSPI_Cntl_BASE+0x328 %LE %Long 0x00001C01
+    Data.Set A:&QSPI_Cntl_BASE+0x32C %LE %Long 0x0
+
+    ;Program LUT10 with WRITE_ENABLE
+    Data.Set A:&QSPI_Cntl_BASE+0x338 %LE %Long 0x00000406   ;       SEQID 2
+    Data.Set A:&QSPI_Cntl_BASE+0x33C %LE %Long 0x0
+
+    ;Program LUT15 with WRITE
+    Data.Set A:&QSPI_Cntl_BASE+0x34C %LE %Long 0x08180402   ;         SEQID 3
+    Data.Set A:&QSPI_Cntl_BASE+0x350 %LE %Long 0x00002001
+    Data.Set A:&QSPI_Cntl_BASE+0x354 %LE %Long 0x0
+
+    ;Program LUT20 with ERASE
+    Data.Set A:&QSPI_Cntl_BASE+0x360 %LE %Long 0x081804D8   ;           SEQID 4
+    Data.Set A:&QSPI_Cntl_BASE+0x364 %LE %Long 0x0
+
+    ;Program LUT25 with READ_ID
+    Data.Set A:&QSPI_Cntl_BASE+0x374 %LE %Long 0x0818049F   ;           SEQID 5
+    Data.Set A:&QSPI_Cntl_BASE+0x378 %LE %Long 0x00001C03
+    Data.Set A:&QSPI_Cntl_BASE+0x37C %LE %Long 0x0
+
+    ;Program LUT30 with READ_CONFIGURATION_REGISTER
+    Data.Set A:&QSPI_Cntl_BASE+0x388 %LE %Long 0x1C010415   ;           SEQID 6
+    Data.Set A:&QSPI_Cntl_BASE+0x38C %LE %Long 0x0
+
+;;;;; OCTAL DDR
+
+    ;Program LUT35 with 8DTRD - READ DOPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x39C %LE %Long 0x471147EE   ;           SEQID 7
+    Data.Set A:&QSPI_Cntl_BASE+0x3A0 %LE %Long 0x0C142B20
+    Data.Set A:&QSPI_Cntl_BASE+0x3A4 %LE %Long 0x00003B01
+    Data.Set A:&QSPI_Cntl_BASE+0x3A8 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3AC %LE %Long 0x00000000
+
+    ;Program LUT40 with WREN - WRITE ENABLE DOPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x3B0 %LE %Long 0x47F94706   ;           SEQID 8
+    Data.Set A:&QSPI_Cntl_BASE+0x3B4 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3B8 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3BC %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3C0 %LE %Long 0x00000000
+
+    ;Program LUT45 with SE - SECTOR ERASE DOPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x3C4 %LE %Long 0x47DE4721   ;           SEQID 9
+    Data.Set A:&QSPI_Cntl_BASE+0x3C8 %LE %Long 0x00002B20
+    Data.Set A:&QSPI_Cntl_BASE+0x3CC %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3D0 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3D4 %LE %Long 0x00000000
+
+    ;Program LUT50 with RDSR - READ STATUS REGISTER DOPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x3D8 %LE %Long 0x47FA4705   ;           SEQID 10
+    Data.Set A:&QSPI_Cntl_BASE+0x3DC %LE %Long 0x0F082B20
+    Data.Set A:&QSPI_Cntl_BASE+0x3E0 %LE %Long 0x00001F08
+    Data.Set A:&QSPI_Cntl_BASE+0x3E4 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3E8 %LE %Long 0x00000000
+
+    ;Program LUT55 with PP - PAGE PROGRAM DOPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x3EC %LE %Long 0x47ED4712   ;           SEQID 11
+    Data.Set A:&QSPI_Cntl_BASE+0x3F0 %LE %Long 0x3F102B20
+    Data.Set A:&QSPI_Cntl_BASE+0x3F4 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3F8 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x3FC %LE %Long 0x00000000
+
+   ; 
+    ;Program LUT60 Write CONFIG2 REGISTER - SPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x400 %LE %Long 0x08200472   ;           SEQID 12
+    Data.Set A:&QSPI_Cntl_BASE+0x404 %LE %Long 0x00002001
+    Data.Set A:&QSPI_Cntl_BASE+0x408 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x40C %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x410 %LE %Long 0x00000000
+
+    ;Program LUT65 Read CONFIG2 REGISTER - SPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x414 %LE %Long 0x08200471   ;           SEQID 13
+    Data.Set A:&QSPI_Cntl_BASE+0x418 %LE %Long 0x00001C01
+    Data.Set A:&QSPI_Cntl_BASE+0x41C %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x420 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x424 %LE %Long 0x00000000
+
+    ;Program LUT70 Read CONFIG2 REGISTER - DOPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x428 %LE %Long 0x478E4771   ;           SEQID 14
+    Data.Set A:&QSPI_Cntl_BASE+0x42C %LE %Long 0x0F142B20
+    Data.Set A:&QSPI_Cntl_BASE+0x430 %LE %Long 0x00001F01
+    Data.Set A:&QSPI_Cntl_BASE+0x434 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x438 %LE %Long 0x00000000
+
+    ;Program LUT75 Write CONFIG2 REGISTER - DOPI mode
+    Data.Set A:&QSPI_Cntl_BASE+0x43C %LE %Long 0x478D4772   ;           SEQID 15
+    Data.Set A:&QSPI_Cntl_BASE+0x440 %LE %Long 0x3F012B20
+    Data.Set A:&QSPI_Cntl_BASE+0x444 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x448 %LE %Long 0x00000000
+    Data.Set A:&QSPI_Cntl_BASE+0x44C %LE %Long 0x00000000
+
+RETURN
+
+
+
+QuadSPI_ReadID:
+
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear reception flags prior to triggering IP read command
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ;set WMRK level
+
+    ; write sequence ID and assert Read id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (5.<<24.)  ; LUT20  and sequence
+
+
+    PRINT "1st 0x" Data.Long(A:&QSPI_Cntl_BASE+0x200)>>24.
+    PRINT "2nd 0x" (Data.Long(A:&QSPI_Cntl_BASE+0x200)>>16.)&0xFF " (Device ID)"
+    PRINT "3rd 0x" (Data.Long(A:&QSPI_Cntl_BASE+0x200)>>8.)&0xFF  " (Density)"
+    PRINT "4th 0x" Data.Long(A:&QSPI_Cntl_BASE+0x200)&0xFF        " (Manufacture)"  
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+RETURN
+
+
+QuadSPI_Erase:
+
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear reception flags prior to triggering IP read command
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ;set WMRK level
+
+    ; write sequence ID and assert WriteEnable id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (2.<<24.)  ; LUT20  and sequence
+    wait 100.ms
+    ; write sequence ID and assert ERASE id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (4.<<24.)  ; LUT20  and sequence
+    wait 200.ms
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+RETURN
+
+
+QuadSPI_Read32Bytes:
+
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear reception flags prior to triggering IP read command
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ;set WMRK level
+
+    ; write sequence ID and assert Read command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  ((1.<<24.)+32.) ; LUT20  and sequence + 32 bytes to be read
+
+
+    PRINT "1st 0x" Data.Long(A:&QSPI_Cntl_BASE+0x200)
+    PRINT "2nd 0x" Data.Long(A:&QSPI_Cntl_BASE+0x204)
+    PRINT "3rd 0x" Data.Long(A:&QSPI_Cntl_BASE+0x208)
+    PRINT "4th 0x" Data.Long(A:&QSPI_Cntl_BASE+0x20C)
+    PRINT "5th 0x" Data.Long(A:&QSPI_Cntl_BASE+0x210)
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+RETURN
+
+
+QuadSPI_Write32Bytes:
+
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ; load TX buffer
+    ; clear TX counters
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x01020304
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x05060708
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x090A0B0C
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x0D0E0F10
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x11223344
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x55667788
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x99AABBCC
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0xDDEEFF00
+
+    ; write sequence ID and assert WriteEnable id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (2.<<24.)  ; LUT20  and sequence
+    wait 100.ms
+
+
+    ; write sequence ID and assert ERASE id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  ((3.<<24.)+32.)  ; LUT20  and sequence + 32 bytes to be written
+    wait 200.ms
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+RETURN
+
+
+
+;;;;;;; DOPI mode
+
+
+QuadSPI_InitDOPI_DLL_AutoUpdateMode_100MHz:
+
+    ;External DQS pad loopback, DDR Octal mode, AHB and IP modes configured, DLL Auto Update mode, 100 MHz
+
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x000F404C        ; QuadSPI0->MCR =  QuadSPI_MCR_MDIS_MASK; disable module
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x030F40CC        ; QuadSPI0->MCR =  Select External DQS, DDR_EN, DQS_EN, no CK2N, Edge aligned clock.
+
+    Data.Set A:&QSPI_Cntl_BASE+0x0C %LE %Long 0x00010303        ; QuadSPI0->FLSHCR = QuadSPI_FLSHCR_TCSH(3) | QuadSPI_FLSHCR_TCSS(3); Flash specific
+
+
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x82800000
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x82800008
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x8280000D        ; QuadSPI0->DLLCRA; DDLEN=0,FREQEN=1,REFCNTR=1,DLLRES=2,SLV_FINE_OFFSET=0,SLV_DLY_OFFSET=0,SLV_DLY_COARSE=5,SLV_DLY_FINE=0,SLAVE_AUTO_UPDT=0,SLV_EN=1,SLV_DLL_BYPASS=1,SLV_UPD=1.
+
+
+    Data.Set A:&QSPI_Cntl_BASE+0x104 %LE %Long 0x00000000       ; QuadSPI0->SFACR; PPWB  = 0
+    Data.Set A:&QSPI_Cntl_BASE+0x108 %LE %Long 0x44000000       ; QuadSPI0->SMPR;
+
+
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x030F00CC        ; QuadSPI0->MCR =  QuadSPI_MCR_MDIS_MASK; enable module
+    
+; We assume we are after a reset, in SPI mode 1X SDR
+    
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear reception flags prior to triggering IP read command
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ;set WMRK level
+
+    ; write sequence ID and assert WriteEnable id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (2.<<24.)  ; sequence
+    wait 100.ms
+    
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x00000002
+
+    ; Program LUT60 Write CONFIG2 REGISTER - SPI mode with value to switch to DOPI mode. From this point on, all LUT seqs should be DDR OPI mode compatible
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (12.<<24.)  ; sequence
+    wait 100.ms
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+    
+RETURN
+
+QuadSPI_InitDOPI_BypassMode_66MHz:
+
+    ;Internal DQS dummy pad loopback, DDR Octal mode, AHB and IP modes configured, DLL Bypass mode, 66 MHz
+
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x00004000        ; QuadSPI0->MCR =  QuadSPI_MCR_MDIS_MASK; disable module
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x010F40CC        ; QuadSPI0->MCR =  Select Internal DQS dummy pad loopback, DDR_EN, no CK2N.
+
+    Data.Set A:&QSPI_Cntl_BASE+0x0C %LE %Long 0x00010303        ; QuadSPI0->FLSHCR = QuadSPI_FLSHCR_TCSH(3) | QuadSPI_FLSHCR_TCSS(3); Flash specific
+
+
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x00000000        ; Reset DLLCRA
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x00000004        ; SLV_EN
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x00000006        ; SLV_DLL_BYPASS
+    Data.Set A:&QSPI_Cntl_BASE+0x60 %LE %Long 0x00000007        ; SLV_UPD. QuadSPI0->DLLCRA; DDLEN=0,FREQEN=0,REFCNTR=0,DLLRES=0,SLV_FINE_OFFSET=0,SLV_DLY_OFFSET=0,SLV_DLY_COARSE=0,SLV_DLY_FINE=0,SLAVE_AUTO_UPDT=0,SLV_EN=1,SLV_DLL_BYPASS=1,SLV_UPD=1.
+
+
+    Data.Set A:&QSPI_Cntl_BASE+0x104 %LE %Long 0x00000000       ; QuadSPI0->SFACR; PPWB  = 0
+    Data.Set A:&QSPI_Cntl_BASE+0x108 %LE %Long 0x00000000       ; QuadSPI0->SMPR;
+
+
+    Data.Set A:&QSPI_Cntl_BASE+0x00 %LE %Long 0x010F00CC        ; QuadSPI0->MCR =  QuadSPI_MCR_MDIS_MASK; enable module
+    
+; We assume we are after a reset, in SPI mode 1X SDR
+    
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear reception flags prior to triggering IP read command
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ;set WMRK level
+
+    ; write sequence ID and assert WriteEnable id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (2.<<24.)  ; sequence
+    wait 100.ms
+    
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x00000002
+
+    ; Program LUT60 Write CONFIG2 REGISTER - SPI mode with value to switch to DOPI mode. From this point on, all LUT seqs should be DDR OPI mode compatible
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (12.<<24.)  ; sequence
+    wait 100.ms
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+    
+RETURN
+
+
+
+
+QuadSPI_Read32BytesDOPI:
+
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear reception flags prior to triggering IP read command
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ;set WMRK level
+
+    ; write sequence ID and assert Read command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  ((7.<<24.)+32.) ; sequence 7 + 32 bytes to be read
+
+
+    PRINT "1st 0x" Data.Long(A:&QSPI_Cntl_BASE+0x200)
+    PRINT "2nd 0x" Data.Long(A:&QSPI_Cntl_BASE+0x204)
+    PRINT "3rd 0x" Data.Long(A:&QSPI_Cntl_BASE+0x208)
+    PRINT "4th 0x" Data.Long(A:&QSPI_Cntl_BASE+0x20C)
+    PRINT "5th 0x" Data.Long(A:&QSPI_Cntl_BASE+0x210)
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+RETURN
+
+
+
+QuadSPI_EraseDOPI:
+
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear reception flags prior to triggering IP read command
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ;set WMRK level
+
+    ; write sequence ID and assert WriteEnable id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (8.<<24.)  ; sequence
+    wait 100.ms
+    ; write sequence ID and assert ERASE id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (9.<<24.)  ; sequence
+    wait 200.ms
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+RETURN
+
+QuadSPI_Write32BytesDOPI:
+
+    Data.Set A:&QSPI_Cntl_BASE+0x100 %Long  &QSPI_BASE      ; SFAR , FLASH BASE ADDRESS
+
+    ; clear the error flags
+    Data.Set A:&QSPI_Cntl_BASE+0x160 %LE %Long 0xFFFFFFFF
+
+    ; load TX buffer
+    ; clear TX counters
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x01020304
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x05060708
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x090A0B0C
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x0D0E0F10
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x11223344
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x55667788
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0x99AABBCC
+    Data.Set A:&QSPI_Cntl_BASE+0x154 %LE %Long 0xDDEEFF00
+
+    ; write sequence ID and assert WriteEnable id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  (8.<<24.)  ; sequence
+    wait 100.ms
+
+
+    ; write sequence ID and assert ERASE id command
+    Data.Set A:&QSPI_Cntl_BASE+0x08 %Long  ((11.<<24.)+32.)  ; sequence + 32 bytes to be written
+    wait 200.ms
+
+    ; clear the RX Buffer and reception flags, counters.
+    &temp=Data.Long(A:&QSPI_Cntl_BASE)
+    Data.Set A:&QSPI_Cntl_BASE %Long (&temp|0x0c00)   ;Clear Tx/Rx buffer
+
+RETURN
+
+TestModeEntry:
+(
+;
+; This file was generated from an atp by VBA code (created by Paul DeRouen) which is part of the ATE_Debugger shared block.  Enjoy!
+; and modified with recommendations from Joe Chayachinda
+; - anytime above 32 bits, use SHIFTREG for MSB
+; - add JTAG.UNLOCK after last instruction
+; Original ATP generated from verif testbench : 
+; $CC_PATH/testbench/classes_v/
+;  test_mode_entry.sv 
+;  ate_base_sequence.sv - enable_tcu
+;
+; Added IDCODE test from Lan's .cmm tests
+; http://bitbucket.sw.nxp.com/users/nxa10077/repos/emu/browse/zebu/t32/GW_idcode_test_revised.cmm
+
+; ***********
+; Macros
+; ***********
+&JTAG_GOTHRU_PAUSEIR=        "JTAG.SHIFTTMS 1 1 0 1 0 1 1 0" 	    ; Traverse Thru Pause-IR back to run-test/idle
+&JTAG_GOTHRU_PAUSEDR=        "JTAG.SHIFTTMS 1 0 1 0 1 1 0" 	      ; Traverse Thru Pause-DR back to run-test/idle
+&JTAG_GOTO_SHIFTIR=      "JTAG.SHIFTTMS 1 1 0 0" 	    ; Enter Shift-IR
+&JTAG_GOTO_SHIFTDR=      "JTAG.SHIFTTMS 1 0 0"   	    ; Enter Shift-DR
+&JTAG_GOTO_RT_IDLE=      "JTAG.SHIFTTMS 1 0"     	    ; Return to run-test/idle
+&JTAG_EXIT1DR_TO_SHIFTDR="JTAG.SHIFTTMS 1 1 0 0"	    ; Go from Exit1-DR to Shift-DR
+&JTAG_GOTO_MAIN_JTAG_TAP="JTAG.SHIFTTMS 1 0 0 1 0 1 1 0"    ; Go back to main JTAG TAP 
+
+;  OPEN #1 t32.log /Create
+;  PRINT "[T32] INFO: GW_idcode_test_modified"
+  
+;  sys.cpu S32G-M7_0
+  &expected=0x830101D
+  break
+  
+  ;;JTAG.PARKSTATE RTI
+  JTAG.LOCK
+  JTAG.PIN ENable
+  
+  ; ------------------------------------------------------------------------------------------------------------------------
+  ; Part 1 - confirm we can read IDCODE - from Lan Nguyen's script
+  ; ------------------------------------------------------------------------------------------------------------------------
+  
+    ; move TAP controller from "Run-Test/Idle" to "Shift-DR" state
+    ;run test or idle state
+    JTAG.SHIFTTMS 	1 1 1 1 1 0
+   
+    ;Shift IR 
+    JTAG.SHIFTTMS 	1 1 0 0
+    
+    ;leave shift IR on last bit
+    JTAG.SHIFTTMS 0 0 0 0 0 0 0 1
+  
+    ;Idcode reg is shifted to DR path
+    JTAG.SHIFTTMS 1 1 0 0	
+    
+    ; 32 Bit "Shift-DR", WITH exiting to "EXIT1-DR"
+    JTAG.SHIFTREG %Long 0x0
+    
+    ; get data read out via TDO
+    &idcode=JTAG.SHIFT()
+  
+    ; move TAP controller from "Exit1-DR" to "Run-Test/Idle" state
+    JTAG.SHIFTTMS 1 1 
+  
+    ; Release JTAG port
+    JTAG.PIN TMS 0 ; pull TMS pin to 0
+    JTAG.PIN TDI 0 ; pull TDI pin to 0
+    JTAG.unlock
+  
+    PRINT "[T32] INFO: Attached to CPU 7: " 
+    PRINT "[T32] INFO: ID-code of device : 0x" &idcode
+    PRINT "[T32] DEBUG: Expected ID-code : 0x" &expected
+  
+  ; ------------------------------------------------------------------------------------------------------------------------
+  ; Part 2 - attempt to enter TEST MODE
+  ; ------------------------------------------------------------------------------------------------------------------------
+  
+  JTAG.LOCK
+  JTAG.PIN ENable
+  
+    ;run test or idle state
+    JTAG.SHIFTTMS 	1 1 1 1 1 0
+  
+  &JTAG_GOTO_SHIFTIR
+  JTAG.SHIFTREG 1 1 0 0 0 0 0 1	; access TCU TAP - matches 16ffc_Test_Mode_Entry2.3 
+  &JTAG_GOTO_RT_IDLE
+  
+  &JTAG_GOTO_SHIFTIR
+  JTAG.SHIFTREG 0 0 0 0 0 0 1
+  &JTAG_GOTO_RT_IDLE
+  
+  &JTAG_GOTO_SHIFTDR
+  JTAG.SHIFTTDI 0 0 0 1 0 0 0 1 0 1 1 0 1 1 0 0 0 1 1 0 1 0 0 1 0 0 1 0 0 0 1 1  ; c496.3688
+  JTAG.SHIFTTDI 0 0 1 1 1 0 1 1 1 1 0 0 1 0 1 1 1 1 1 1 1 0 1 1 1 0 1 1 0 0 1 1  ; cddf.d3dc
+  JTAG.SHIFTTDI 1 0 0 1 1 0 1 0 0 1 1 0 0 1 1 0 1 0 1 0 0 1 0 0 1 0 1 1 0 0 0 0  ; 0d25.6659
+  JTAG.SHIFTREG 0 1 1 0 0 1 1 1 0 0 0 1 0 0 0 1 0 1 0 0 0 0 0 1 1 0 1 0 0 0 1 0  ; 4582.88e6
+  &JTAG_GOTO_RT_IDLE
+  
+  &JTAG_GOTO_SHIFTDR
+  JTAG.SHIFTTDI 0 1 0 1 1 1 0 1 1 1 1 1 0 1 0 0 1 0 1 0 1 0 1 0 0 1 0 1 1 1 0 1  
+  JTAG.SHIFTTDI 0 1 1 0 1 1 1 1 0 1 1 0 1 0 0 1 1 1 1 1 1 0 1 0 1 1 0 0 0 1 1 0
+  JTAG.SHIFTTDI 1 0 1 0 0 0 1 1 0 0 0 1 0 1 1 1 1 0 1 1 0 0 1 0 0 1 0 1 0 1 1 1 
+  JTAG.SHIFTREG 0 0 1 0 1 0 1 1 0 1 0 0 0 0 1 0 0 1 1 1 0 1 0 0 1 0 0 1 0 1 0 1
+  &JTAG_GOTO_RT_IDLE
+  
+  
+  &JTAG_GOTO_SHIFTIR
+  ; test TDR enable - address 0x41
+  ; 65=0x41 - matches tool_data/csv_parser/TDR_Description_Global_TCU_jtag_api_version.csv ; line 18
+  JTAG.SHIFTREG 1 0 0 0 0 0 1	
+  &JTAG_GOTO_RT_IDLE
+  
+  &JTAG_GOTO_SHIFTDR
+  ; write to TEST_EN_TDR with 9566.AA0F 
+  ; - testbench/classes_v/ate_base_sequence.sv line 1302
+  JTAG.SHIFTTDI 1 1 1 1 0 0 0 0 0 1 0 1 0 1 0 1 0 1 1 0 0 1 1 0 1 0 1 0 1 0 0 1 
+  JTAG.SHIFTREG 0 1 
+  &JTAG_GOTO_RT_IDLE
+  
+  ;  JTAG.SHIFTTMS 1 0 0 1 0 1 1 0          ; pause dr and return to run test idle
+  &JTAG_GOTO_MAIN_JTAG_TAP
+  ;&JTAG_GOTHRU_PAUSEDR
+  &JTAG_GOTO_SHIFTIR
+  JTAG.SHIFTREG 0 0 0 0 0 0 0 0
+  &JTAG_GOTO_RT_IDLE
+  
+  &JTAG_GOTO_SHIFTIR
+  ; matches tool_data/verilog/debug_defines.tcl : line 116 - TEST_CTRL addr
+  JTAG.SHIFTREG 0 1 1 0 0 0 0 0	
+  &JTAG_GOTO_RT_IDLE
+  
+  ; JTAG_TEST_CTRL[23] - enable tcu : testbench/classes_v/ate_base_sequence.sv
+  &JTAG_GOTO_SHIFTDR
+  JTAG.SHIFTTDI 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 
+  JTAG.SHIFTTDI 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  JTAG.SHIFTTDI 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  JTAG.SHIFTTDI 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  JTAG.SHIFTTDI 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  JTAG.SHIFTTDI 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  JTAG.SHIFTREG 0 0 0 0 0 0 0 0
+  &JTAG_GOTO_RT_IDLE
+  
+  ; =========================================================================================
+  ; go to SELECT_DR_SCAN
+  ; - without this, we get "debug port error" following the JTAG.UNLOCK!!!!!!
+  ; =========================================================================================
+  JTAG.SHIFTTMS 	1 
+  
+  JTAG.PIN TMS 0 ; pull TMS pin to 0
+  JTAG.PIN TDI 0 ; pull TDI pin to 0
+  JTAG.UNLOCK 
+  
+  ; Now Test Mode should be enabled
+  
+  ; ATX register read
+  d.set 0x40008000 %long 0x123
+  d.in 0x40008000 /long
+  &data = (Data.Long(SD:0x40008000))
+  PRINT "[T32] INFO:  Prior to STAM enable"
+  PRINT "[T32] INFO:  ATX read data : 0x" &data
+  
+  ; Enable STAM
+  d.set 0x4000c028 %long 0xaf9a02d2
+  d.set 0x4000c028 %long 0xdb78b6ec
+  d.set 0x4000c028 %long 0xb6ea2db0
+  d.set 0x4000c028 %long 0xfe10d5b2
+  d.set 0x4000c028 %long 0xf6f55f81
+  d.set 0x4000c028 %long 0x2efe3068
+  d.set 0x4000c028 %long 0x590e16e2
+  d.set 0x4000c028 %long 0x63439d0e
+  d.set 0x4000c02c %long 0x5
+  
+  ; ATX register read
+  d.set 0x40008000 %long 0x123
+  &expected=0x123
+  d.in 0x40008000 /long
+  &data = (Data.Long(SD:0x40008000))
+  PRINT "[T32] INFO:  Post STAM enable"
+  PRINT "[T32] INFO:  ATX read data : 0x" &data
+  PRINT "[T32] DEBUG: Expected ATX read data : 0x" &expected
+   
+  &error=0
+  IF &data!=0x123
+    &error=1
+  IF &error==0
+    PRINT "[T32] INFO:  STAM Test status = PASS"
+  ELSE
+    PRINT "[T32] ERROR: STAM Test status = FAIL"
+;  CLOSE #1
+
+    ;/* PF03 for Clockout0 and PF04 Clockout1 */
+  PER.Set.simple ASD:0x4009C38C %Long 0x200001  ; SIUL2_0.MSCR[83]
+  PER.Set.simple ASD:0x4009C390 %Long 0x200001  ; SIUL2_0.MSCR[84]
+
+  PER.Set.simple ASD:0x40030340 %Long 0x2E000004 ; select TEST_CLOCK_MUX_0 to CLOCK_OUT_0, 
+  PER.Set.simple ASD:0x40030348 %Long 0x80630000 ; DIV=100    
+  
+  PER.Set.simple ASD:0x40030380 %Long 0x2F000000 ; select TEST_CLOCK_MUX_1 to CLOCK_OUT_1, 
+  PER.Set.simple ASD:0x40030388 %Long 0x80630000 ; DIV=100
+
+  Data.Set SD:0x40010c08 %LE %Long 0            ;//test clk mux selection - FIRC
+  Data.Set SD:0x40010c08 %LE %Long 2            ;//test clk mux selection - CORE_PLL/PHI0
+  Data.Set SD:0x40010c08 %LE %Long 4            ;//test clk mux selection - PERIPH_PLL/PHI1
+  Data.Set SD:0x40010c08 %LE %Long 0x0C           ;//test clk mux selection - DDR_PLL/PHI0
+  Data.Set SD:0x40010c08 %LE %Long 0x0F           ;//test clk mux selection - CORE_DFS/DFS0
+  Data.Set SD:0x40010c08 %LE %Long 0x15           ;//test clk mux selection - PERIPH_DFS/DFS0
+  Data.Set SD:0x40010c08 %LE %Long 0x20           ;//test clk mux selection - PER_CLK
+  Data.Set SD:0x40010c08 %LE %Long 0x27           ;//test clk mux selection - QSPI_2X_CLK
+  Data.Set SD:0x40010c08 %LE %Long 0x55           ;//test clk mux selection - ddr_top/ddr_ss_ddr_pmu_sram_clk_gated
+  Data.Set SD:0x40010c08 %LE %Long 0x5E	        ;//DDR_PLL/fbclkout
+  Data.Set SD:0x40010c08 %LE %Long 0x5F	        ;//DDR_PLL/pllclkout1_raw
+  Data.Set SD:0x40010c08 %LE %Long 0x60	        ;//DDR_PLL/pllclkout2_raw
+  Data.Set SD:0x40010c08 %LE %Long 0x61	        ;//DDR_PLL/refclkout
+  
+  
+  ;Data.Set SD:0x4000C028 %LE %Long 0x4d494b45   ;STAM_TEST_ACCESS_REG_UNLOCK
+  ;Data.Set SD:0x4000C028 %LE %Long 0x49534d45   ;STAM_TEST_ACCESS_REG_UNLOCK
+  ;Data.Set SD:0x4000C02C %LE %Long 0x5          ;STAM_TEST_ACCESS_REGS
+  
+  ;Data.Set SD:0x40010c04 %LE %Long 12           ;//test clk mux selection
+  ;Data.Set SD:0x4007ca5c %LE %Long 0x30         ;//lvds set
+  ;Data.Set SD:0x40010c20 %LE %Long 0x01         ;//expose lvds enable
+
+  
+
+  RETURN
+
+)
+
+;1.
+;MC_CGM	 
+;Index	Clock
+;2	    FXOSC/osc_clk
+;18	    PERIPH_PLL/PHI0
+;27	    PERIPH_DFS/DFS2
+;30	    PERIPH_DFS/DFS5
+;46	    TEST_CLK_MUX (CLKOUT0)
+;47	    TEST_CLK_MUX (CLKOUT1)
+;
+;
+;2.
+;TST_CLK_MUX
+;Index	Clock	 	            Index	Clock	 	                Index	Clock
+;0	FIRC/clk_out_lv	 	        34	GMAC0_RX_CLK	 	            68	mc_cgm_2_o_clk_mux_div0[7]
+;1	SIRC/clk_out_lv	 	        35	GMAC0_TS_CLK	 	            69	PFE_MAC_1_REF_DIV_CLK
+;2	CORE_PLL/PHI0	 	        36	FLEXRAY_PE_CLK	 	            70	PFE_MAC_2_REF_DIV_CLK
+;3	CORE_PLL/PHI1	 	        37	FTM0_EXT_CLK	 	            71	PFE_SYS_CLK
+;4	PERIPH_PLL/PHI1	 	        38	FTM1_EXT_CLK	 	            72	reserved
+;5	PERIPH_PLL/PHI2	 	        39	QSPI_2X_CLK	 	                73	pcie_1/phy0_dtb_out[0]
+;6	PERIPH_PLL/PHI3	 	        40	SDHC_CLK	 	                74	pcie_1/phy0_dtb_out[1]
+;7	PERIPH_PLL/PHI4	 	        41	post_top_wrap/fa_out	 	    75	pcie_1/phy0_ref_dig_clk
+;8	PERIPH_PLL/PHI5	 	        42	atp_top/ipp_ind_lv_aur_clk_p    76	pcie_1/phy0_mplla_oword_clk
+;9	PERIPH_PLL/PHI6	 	        43	reserved	 	                77	pcie_1/phy0_mpllb_oword_clk
+;10	PERIPH_PLL/PHI7	 	        44	FIRC/clk_out_raw_lv	 	        78	pcie_0/pcie0_core_clk
+;11	atp_top/gated_clk_out	    45	SIRC/clk_out_raw_lv	 	        79	pcie_0/pcie0_mstr_aclk_g
+;12	DDR_PLL/PHI0	 	        46	pcie_1/pcie0_mstr_aclk_g	 	80	pcie_0/pcie0_muxd_aux_clk
+;13	ACCEL_PLL/PHI0	 	        47	pcie_1/pcie0_muxd_aux_clk	 	81	pcie_0/pcie0_muxd_aux_clk_g
+;14	ACCEL_PLL/PHI1	 	        48	pcie_1/pcie0_core_clk	 	    82	pcie_0/pcie0_radm_clk_g
+;15	CORE_DFS/DFS0	 	        49	pcie_1/pcs0_clk_rx_o	 	    83	pcie_0/pcie0_slv_aclk_g
+;16	CORE_DFS/DFS1	 	        50	pcie_1/pcs0_clk_tx_o	 	    84	pcie_0/phy0_sram_clk
+;17	CORE_DFS/DFS2	 	        51	pcie_1/pcs1_clk_rx_o	 	    85	ddr_top/ddr_ss_ddr_pmu_sram_clk_gated
+;18	CORE_DFS/DFS3	 	        52	pcie_1/pcs1_clk_tx_o	 	    86	CORE_PLL/fbclkout
+;19	CORE_DFS/DFS4	 	        53	PFE_MAC_0_EXT_REF_CLK	 	    87	CORE_PLL/pllclkout1_raw
+;20	CORE_DFS/DFS5	 	        54	PFE_MAC_1_EXT_REF_CLK	 	    88	CORE_PLL/pllclkout2_raw
+;21	PERIPH_DFS/DFS0	 	        55	PFE_MAC_2_EXT_REF_CLK	 	    89	CORE_PLL/refclkout
+;22	PERIPH_DFS/DFS2	 	        56	PFE_MAC_0_RX_CLK	 	        90	ACCEL_PLL/fbclkout
+;23	PERIPH_DFS/DFS3	 	        57	PFE_MAC_1_RX_CLK	 	        91	ACCEL_PLL/pllclkout1_raw
+;24	PERIPH_DFS/DFS5	 	        58	PFE_MAC_2_RX_CLK	 	        92	ACCEL_PLL/pllclkout2_raw
+;25	pcie_0/phy0_mplla_oword_clk	59	PFE_MAC_0_TX_CLK	 	        93	ACCEL_PLL/refclkout
+;26	pcie_0/phy0_mpllb_oword_clk	60	PFE_MAC_1_TX_CLK	 	        94	DDR_PLL/fbclkout
+;27	pcie_0/phy0_ref_dig_clk	 	61	PFE_MAC_2_TX_CLK	 	        95	DDR_PLL/pllclkout1_raw
+;28	atp_top/refclkout	 	    62	PFE_SYS_CLK	 	                96	DDR_PLL/pllclkout2_raw
+;29	atp_top/fbclkout	 	    63	GMAC0_TS_CLK	 	            97	DDR_PLL/refclkout
+;30	reserved	 	            64	PFE_PE_CLK	 	                98	PERIPH_PLL/fbclkout
+;31	LBIST_CLK[0]	 	        65	PFE_MAC_0_TX_CLK	 	        99	PERIPH_PLL/pllclkout1_raw
+;32	PER_CLK	 	                66	PFE_MAC_1_TX_CLK	 	        100	PERIPH_PLL/pllclkout2_raw
+;33	GMAC0_TX_CLK	 	        67	PFE_MAC_2_TX_CLK	 	        101	PERIPH_PLL/refclkout
+
+ENDDO
